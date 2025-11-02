@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>BetterThrowingSystem</AssemblyName>
+    <RootNamespace>BetterThrowingSystem</RootNamespace>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Unity Engine DLLs - use wildcards to include all Unity DLLs -->
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\UnityEngine.dll" />
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\UnityEngine.CoreModule.dll" />
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\UnityEngine.*.dll" />
+    <!-- Game-specific DLLs - use wildcards -->
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\TeamSoda.*.dll" />
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\ItemStatsSystem.dll" />
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\Duckov.*.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Use NuGet package for UniTask -->
+    <PackageReference Include="UniTask" Version="2.3.3" />
+  </ItemGroup>
+
+</Project>
+

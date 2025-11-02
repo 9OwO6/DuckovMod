@@ -1,0 +1,23 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.pdb
+*.cache
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# Steam upload folder (temporary)
+UploadReady/
+
+# Preview images (keep source, ignore duplicates)
+preview.jpg
+
+# Temporary files
+*.tmp
+*.log
+

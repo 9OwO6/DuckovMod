@@ -1,0 +1,43 @@
+# Steam Workshop Upload Ignore File
+# Files and directories listed here will be excluded from upload
+
+# Build output directories
+bin/
+obj/
+
+# Source code files
+*.cs
+*.csproj
+*.sln
+*.sln.DotSettings.user
+
+# Build scripts
+*.bat
+*.sh
+*.ps1
+
+# Documentation (not needed for mod to work)
+*.md
+README.md
+TESTING.md
+SOLUTION_PLAN.md
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# NuGet packages cache
+*.nupkg
+packages/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.cache
+
