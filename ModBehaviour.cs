@@ -21,6 +21,9 @@ namespace BetterThrowingSystem
         // Player transform for dialogue bubbles
         private Transform? playerTransform;
         
+        // Language support
+        private bool isChinese = false; // Whether game is running in Chinese
+        
         // List of throwable item slot numbers grouped by TypeID (category-based switching)
         private Dictionary<int, List<int>> throwableSlotsByTypeID = new Dictionary<int, List<int>>();
         // List of throwable TypeIDs in order (for category switching)
@@ -73,6 +76,9 @@ namespace BetterThrowingSystem
                 Debug.LogWarning("[BTS] Player transform not found, will use Camera.main.transform as fallback.");
             }
 
+            // Detect game language
+            DetectGameLanguage();
+            
             // Scan and print all registered items in ItemAssetsCollection
             // This helps find the correct TypeID for throwables
             ScanAllRegisteredItems();
@@ -132,7 +138,7 @@ namespace BetterThrowingSystem
                     }
                     else
                     {
-                        ShowDebugBubble("❌ 背包中没有投掷物");
+                        ShowDebugBubble(isChinese ? "❌ 背包中没有投掷物" : "❌ No throwables in inventory");
                         isInSelectionMode = false;
                         gKeyHoldTime = 0f;
                     }
@@ -163,7 +169,7 @@ namespace BetterThrowingSystem
                     if (playerForGKey == null)
                     {
                         Debug.LogError("[BTS] ❌ CRITICAL: Player not found! Cannot proceed.");
-                        ShowDebugBubble("❌ 错误：找不到玩家角色");
+                        ShowDebugBubble(isChinese ? "❌ 错误：找不到玩家角色" : "❌ Error: Player character not found");
                         gKeyHoldTime = 0f;
                         return;
                     }
@@ -470,7 +476,8 @@ namespace BetterThrowingSystem
                             // Only keep the first slot for each TypeID
                             if (!throwablesByTypeID.ContainsKey(typeID))
                             {
-                                string itemName = item.name.Replace("(Clone)", "").Trim();
+                                string rawItemName = item.name.Replace("(Clone)", "").Trim();
+                                string itemName = GetLocalizedItemName(rawItemName);
                                 Sprite? icon = null;
                                 
                                 // Try to get icon
@@ -589,7 +596,10 @@ namespace BetterThrowingSystem
                 
                 // Format bubble text with icon indicator (Unicode icon if available)
                 string iconIndicator = throwable.icon != null ? "🎯" : "💣";
-                string bubbleText = $"投掷物选择中，{iconIndicator} {throwable.name}";
+                string itemName = GetLocalizedItemName(throwable.name);
+                string bubbleText = isChinese 
+                    ? $"投掷物选择中，{iconIndicator} {itemName}"
+                    : $"Selecting throwable, {iconIndicator} {itemName}";
                 
                 Debug.Log($"[BTS] Showing selection bubble: {bubbleText} (Icon: {(throwable.icon != null ? "Available" : "None")})");
                 
@@ -675,13 +685,21 @@ namespace BetterThrowingSystem
                     
                     // Show confirmation bubble with icon indicator
                     string iconIndicator = selected.icon != null ? "🎯" : "💣";
-                    ShowDebugBubble($"✓ 已选择：{iconIndicator} {selected.name}");
+                    string itemName = GetLocalizedItemName(selected.name);
+                    string message = isChinese 
+                        ? $"✓ 已选择：{iconIndicator} {itemName}"
+                        : $"✓ Selected: {iconIndicator} {itemName}";
+                    ShowDebugBubble(message);
                     
                     Debug.Log($"[BTS] ✓ Successfully equipped selected throwable category: {selected.name}");
                 }
                 else
                 {
-                    ShowDebugBubble($"❌ 无法装备：{selected.name}");
+                    string itemName = GetLocalizedItemName(selected.name);
+                    string message = isChinese 
+                        ? $"❌ 无法装备：{itemName}"
+                        : $"❌ Cannot equip: {itemName}";
+                    ShowDebugBubble(message);
                     Debug.LogError($"[BTS] Failed to equip selected throwable: {selected.name}");
                 }
                 
@@ -1566,7 +1584,7 @@ namespace BetterThrowingSystem
             if (throwableTypeIDsInOrder.Count == 0)
             {
                 Debug.LogWarning("[BTS] No throwable items found in inventory slots!");
-                ShowDebugBubble("❌ 背包中没有投掷物");
+                ShowDebugBubble(isChinese ? "❌ 背包中没有投掷物" : "❌ No throwables in inventory");
                 return;
             }
             
@@ -1689,7 +1707,7 @@ namespace BetterThrowingSystem
             if (!IsPlayerSafeToSwitch(player))
             {
                 Debug.LogWarning("[BTS] Player is not in a safe state to switch items - operation cancelled");
-                ShowDebugBubble("⚠️ 当前状态无法切换");
+                ShowDebugBubble(isChinese ? "⚠️ 当前状态无法切换" : "⚠️ Cannot switch in current state");
                 return;
             }
             
@@ -1714,7 +1732,8 @@ namespace BetterThrowingSystem
                         var item = getItemMethod.Invoke(inventory, new object[] { targetSlot }) as Item;
                         if (item != null)
                         {
-                            itemName = item.name.Replace("(Clone)", "").Trim();
+                            string rawName = item.name.Replace("(Clone)", "").Trim();
+                            itemName = GetLocalizedItemName(rawName);
                         }
                     }
                 }
@@ -1735,7 +1754,7 @@ namespace BetterThrowingSystem
             }
             else
             {
-                ShowDebugBubble("❌ 无法切换到槽位");
+                ShowDebugBubble(isChinese ? "❌ 无法切换到槽位" : "❌ Cannot switch to slot");
             }
         }
         
@@ -2436,9 +2455,11 @@ namespace BetterThrowingSystem
             
             // Exclude by name patterns that are definitely not throwables
             string[] excludedNamePatterns = {
-                "bean", "豆子", "罐头", "can", "candy", "糖果", 
+                "bean", "豆子", "罐头", "can", "candy", "糖果", "自制糖果",
                 "flashlight", "手电",
-                "冲锋枪", "rifle", "gun", "weapon", "枪"
+                "冲锋枪", "rifle", "gun", "weapon", "枪",
+                "toy", "玩具", "cannon", "大炮", "玩具大炮",
+                "rubber", "橡胶", "工作服", "uniform", "suit"
             };
             foreach (var pattern in excludedNamePatterns)
             {
@@ -2871,6 +2892,156 @@ namespace BetterThrowingSystem
             }
         }
 
+        /// <summary>
+        /// Detect game language (Chinese or English)
+        /// </summary>
+        private void DetectGameLanguage()
+        {
+            try
+            {
+                // Method 1: Check Application.systemLanguage
+                SystemLanguage systemLang = Application.systemLanguage;
+                if (systemLang == SystemLanguage.Chinese || 
+                    systemLang == SystemLanguage.ChineseSimplified || 
+                    systemLang == SystemLanguage.ChineseTraditional)
+                {
+                    isChinese = true;
+                    Debug.Log("[BTS] Game language detected as Chinese (via SystemLanguage)");
+                    return;
+                }
+                
+                // Method 2: Try to find localization system in the game
+                // Check for SodaLocalization or similar systems
+                var localizationType = System.Type.GetType("SodaLocalization.Localization") ?? 
+                                      System.Type.GetType("TeamSoda.MiniLocalizor.Localization");
+                
+                if (localizationType != null)
+                {
+                    var currentLangProp = localizationType.GetProperty("CurrentLanguage",
+                        System.Reflection.BindingFlags.Public | 
+                        System.Reflection.BindingFlags.Static | 
+                        System.Reflection.BindingFlags.Instance);
+                    
+                    if (currentLangProp != null)
+                    {
+                        var currentLang = currentLangProp.GetValue(null);
+                        string langStr = currentLang?.ToString() ?? "";
+                        
+                        if (langStr.Contains("Chinese", StringComparison.OrdinalIgnoreCase) ||
+                            langStr.Contains("中文", StringComparison.OrdinalIgnoreCase) ||
+                            langStr.Contains("zh", StringComparison.OrdinalIgnoreCase))
+                        {
+                            isChinese = true;
+                            Debug.Log($"[BTS] Game language detected as Chinese (via Localization: {langStr})");
+                            return;
+                        }
+                    }
+                }
+                
+                // Method 3: Check PlayerPrefs or game settings
+                string langPref = PlayerPrefs.GetString("Language", "");
+                if (langPref.Contains("Chinese", StringComparison.OrdinalIgnoreCase) ||
+                    langPref.Contains("中文", StringComparison.OrdinalIgnoreCase) ||
+                    langPref.Contains("zh", StringComparison.OrdinalIgnoreCase))
+                {
+                    isChinese = true;
+                    Debug.Log($"[BTS] Game language detected as Chinese (via PlayerPrefs: {langPref})");
+                    return;
+                }
+                
+                // Default to English if no Chinese detected
+                isChinese = false;
+                Debug.Log("[BTS] Game language detected as English (default)");
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[BTS] Error detecting language: {e.Message}, defaulting to English");
+                isChinese = false;
+            }
+        }
+        
+        /// <summary>
+        /// Get localized item name (Chinese or English)
+        /// </summary>
+        private string GetLocalizedItemName(string rawItemName)
+        {
+            if (string.IsNullOrEmpty(rawItemName))
+            {
+                return "Unknown";
+            }
+            
+            // Remove (Clone) suffix
+            string cleanName = rawItemName.Replace("(Clone)", "").Trim();
+            
+            // If Chinese, try to get Chinese name from game's localization system
+            if (isChinese)
+            {
+                try
+                {
+                    // Method 1: Try to find Item's localized name property
+                    // Items might have a LocalizedName or DisplayName property
+                    
+                    // Method 2: Use localization system if available
+                    var localizationType = System.Type.GetType("SodaLocalization.Localization") ?? 
+                                          System.Type.GetType("TeamSoda.MiniLocalizor.Localization");
+                    
+                    if (localizationType != null)
+                    {
+                        var getStringMethod = localizationType.GetMethod("GetString",
+                            System.Reflection.BindingFlags.Public | 
+                            System.Reflection.BindingFlags.Static);
+                        
+                        if (getStringMethod != null)
+                        {
+                            try
+                            {
+                                // Try to get localized string for item name
+                                var localized = getStringMethod.Invoke(null, new object[] { cleanName });
+                                if (localized != null && !string.IsNullOrEmpty(localized.ToString()))
+                                {
+                                    return localized.ToString();
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    
+                    // Method 3: Try to get from ItemAssetsCollection
+                    // The item asset might have localized name stored
+                    try
+                    {
+                        var itemAssetsType = typeof(ItemAssetsCollection);
+                        var getAssetMethod = itemAssetsType.GetMethod("GetAsset",
+                            System.Reflection.BindingFlags.Public | 
+                            System.Reflection.BindingFlags.Static);
+                        
+                        if (getAssetMethod != null)
+                        {
+                            // Try different approaches to get item asset
+                            // This requires knowing the TypeID, which we might not have here
+                        }
+                    }
+                    catch { }
+                    
+                    // Fallback: Return clean name (might already be Chinese)
+                    // Many games use Chinese names directly in the item.name
+                    return cleanName;
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogWarning($"[BTS] Error getting localized name for {cleanName}: {e.Message}");
+                    return cleanName;
+                }
+            }
+            else
+            {
+                // English mode: Return English name
+                // If the name contains Chinese characters, we might need to translate
+                // For now, return as-is (assuming item.name is already in English)
+                return cleanName;
+            }
+        }
+        
         /// <summary>
         /// Find the actual player CharacterMainControl (not NPCs)
         /// </summary>
