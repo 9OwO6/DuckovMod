@@ -21,10 +21,40 @@ namespace BetterThrowingSystem
         // Player transform for dialogue bubbles
         private Transform? playerTransform;
         
-        // List of throwable item slot numbers (3-9) in player's inventory
-        private List<int> throwableItemSlots = new List<int>();
-        // Current index in the throwable slots list
-        private int currentThrowableIndex = -1;
+        // List of throwable item slot numbers grouped by TypeID (category-based switching)
+        private Dictionary<int, List<int>> throwableSlotsByTypeID = new Dictionary<int, List<int>>();
+        // List of throwable TypeIDs in order (for category switching)
+        private List<int> throwableTypeIDsInOrder = new List<int>();
+        // Current category index (TypeID-based)
+        private int currentCategoryIndex = -1;
+        
+        // Memory system for throwable selection
+        private int? lastSelectedThrowableSlot = null;      // Last selected throwable slot
+        private int? lastSelectedThrowableTypeID = null;    // Last selected throwable TypeID
+        private int? previousEquippedSlot = null;           // Weapon slot before equipping throwable (deprecated, use slotHash)
+        private KeyCode? previousEquippedKey = null;        // Weapon key before equipping throwable (1/2/V/etc.) (deprecated, use slotHash)
+        private int? previousEquippedSlotHash = null;       // Equipment slot hash before equipping throwable (for SwitchHoldAgentInSlot)
+        private string? previousEquippedSlotKey = null;     // Equipment slot key ("1", "2", "V", etc.)
+        private bool hasCompletedThrow = false;             // Whether throw action was completed
+        private int? lastEquippedThrowableSlot = null;      // Currently equipped throwable slot (if any)
+        private bool lastActionWasGKey = false;             // Whether last action was pressing G key (for detecting continuous G presses)
+        private bool lastActionWasWeaponSwitch = false;     // Whether last action was switching weapon (1/2/V key)
+        
+        // Long-press G selection mode
+        private bool isInSelectionMode = false;             // Whether we're in long-press selection mode
+        private int selectionModeCurrentIndex = 0;          // Current selected throwable index in selection mode
+        private float gKeyHoldTime = 0f;                    // Time G key has been held
+        private const float G_KEY_LONG_PRESS_TIME = 0.3f;   // Time to hold G to enter selection mode (seconds)
+        
+        // For detecting throw completion (monitor item count change)
+        private Dictionary<int, int> lastItemCounts = new Dictionary<int, int>(); // slot -> count
+        
+        // State tracking for throw detection
+        private bool wasHoldingThrowable = false; // Track if we were holding a throwable in previous frame
+        private bool isThrowingInProgress = false; // Track if throw animation is in progress
+        private float throwStartTime = 0f; // Time when throw was detected to have started
+        private const float MAX_THROW_DURATION = 2f; // Maximum throw duration (seconds) - fallback timeout
+        private bool wasMouseButton0Down = false; // Track mouse left button state for throw detection
 
         private void Start()
         {
@@ -78,13 +108,177 @@ namespace BetterThrowingSystem
                 ScanAllInventoryItemsWithDetails();
             }
 
-            // ② G key: Cycle through throwable items in inventory
-            if (Input.GetKeyDown(throwKey))
+            // ② G key: Handle both quick press and long-press selection mode
+            if (Input.GetKey(throwKey))
             {
-                Debug.Log("[BTS] ========== G KEY PRESSED - VERSION 2.0 ==========");
-                CycleToNextThrowable();
+                // G key is held down
+                gKeyHoldTime += Time.deltaTime;
+                
+                // Check if we should enter selection mode
+                if (!isInSelectionMode && gKeyHoldTime >= G_KEY_LONG_PRESS_TIME)
+                {
+                    // Enter selection mode
+                    isInSelectionMode = true;
+                    Debug.Log("[BTS] =========================================");
+                    Debug.Log("[BTS] ========== ENTERING SELECTION MODE ==========");
+                    Debug.Log("[BTS] =========================================");
+                    
+                    // Initialize selection index (start with first throwable category)
+                    var throwablesList = GetAllThrowablesByCategory();
+                    if (throwablesList.Count > 0)
+                    {
+                        selectionModeCurrentIndex = 0;
+                        ShowSelectionModeBubble(throwablesList[selectionModeCurrentIndex]);
+                    }
+                    else
+                    {
+                        ShowDebugBubble("❌ 背包中没有投掷物");
+                        isInSelectionMode = false;
+                        gKeyHoldTime = 0f;
+                    }
+                }
+                
+                // If in selection mode, handle mouse scroll wheel
+                if (isInSelectionMode)
+                {
+                    HandleSelectionModeScroll();
+                }
             }
+            else if (Input.GetKeyUp(throwKey))
+            {
+                // G key was released
+                if (isInSelectionMode)
+                {
+                    // Exit selection mode and equip selected item
+                    ExitSelectionModeAndEquip();
+                }
+                else if (gKeyHoldTime < G_KEY_LONG_PRESS_TIME && gKeyHoldTime > 0f)
+                {
+                    // Quick press - use normal cycle logic
+                    Debug.Log("[BTS] =========================================");
+                    Debug.Log("[BTS] ========== G KEY PRESSED (QUICK) ==========");
+                    Debug.Log("[BTS] =========================================");
+                    
+                    var playerForGKey = FindPlayerCharacter();
+                    if (playerForGKey == null)
+                    {
+                        Debug.LogError("[BTS] ❌ CRITICAL: Player not found! Cannot proceed.");
+                        ShowDebugBubble("❌ 错误：找不到玩家角色");
+                        gKeyHoldTime = 0f;
+                        return;
+                    }
+                    
+                    Debug.Log($"[BTS] Player found: {playerForGKey.gameObject.name}");
+                    
+                    // IMPORTANT: Save current weapon BEFORE switching to throwable
+                    // This must happen BEFORE CycleToNextThrowable, which might change the current item
+                    SaveCurrentEquippedSlot(playerForGKey);
+                    
+                    CycleToNextThrowable();
+                    
+                    // Mark that last action was G key (for detecting continuous G presses)
+                    lastActionWasGKey = true;
+                    lastActionWasWeaponSwitch = false;
+                }
+                
+                // Reset hold time
+                gKeyHoldTime = 0f;
+            }
+            else
+            {
+                // G key not pressed - reset hold time
+                if (!isInSelectionMode)
+                {
+                    gKeyHoldTime = 0f;
+                }
+            }
+            
+            // Detect weapon switching (1/2/V keys) - this breaks "continuous G" sequence
+            if (Input.GetKeyDown(KeyCode.Alpha1) || Input.GetKeyDown(KeyCode.Alpha2) || Input.GetKeyDown(KeyCode.V))
+            {
+                lastActionWasWeaponSwitch = true;
+                lastActionWasGKey = false;
+                
+                // Exit selection mode if active
+                if (isInSelectionMode)
+                {
+                    isInSelectionMode = false;
+                    gKeyHoldTime = 0f;
+                    Debug.Log("[BTS] Selection mode cancelled due to weapon switch");
+                }
+            }
+            
+            // Monitor throw completion through multiple methods:
+            // 1. Item count change (primary - most reliable) - handled in MonitorThrowableItems
+            // 2. Empty hand state after holding throwable (secondary)
+            // 3. Timeout fallback (if throw takes too long)
+            var player = FindPlayerCharacter();
+            
+            // Only monitor if we have a valid player and are tracking a throwable
+            if (player == null)
+            {
+                // Player not found - reset tracking
+                wasHoldingThrowable = false;
+                isThrowingInProgress = false;
+                return;
+            }
+            
+            if (lastEquippedThrowableSlot.HasValue)
+            {
+                var currentItem = GetCurrentHoldItem(player);
+                bool isHoldingThrowable = currentItem != null && IsThrowableItem(currentItem);
+                bool isEmptyHand = currentItem == null;
+                
+                // Track when we start holding throwable
+                if (isHoldingThrowable && !wasHoldingThrowable)
+                {
+                    Debug.Log($"[BTS] 📌 Started holding throwable: {currentItem?.name ?? "null"} (Slot: {lastEquippedThrowableSlot.Value})");
+                    Debug.Log($"[BTS] Previous weapon info - Slot: {previousEquippedSlot}, Key: {previousEquippedKey}");
+                }
+                
+                // Mouse left button release detection (for throw completion)
+                bool isMouseButton0Down = Input.GetMouseButton(0); // Left mouse button
+                bool isMouseButton1Down = Input.GetMouseButton(1); // Right mouse button
+                
+                // Detect mouse left button release while holding throwable (and not right-clicking)
+                if (wasMouseButton0Down && !isMouseButton0Down && isHoldingThrowable && !isMouseButton1Down && !hasCompletedThrow)
+                {
+                    Debug.Log("[BTS] ⚡⚡⚡ THROW COMPLETED (Mouse left button released)! Detected mouse release while holding throwable.");
+                    OnThrowCompleted();
+                }
+                
+                wasMouseButton0Down = isMouseButton0Down;
+                
+                // Secondary detection: empty hand after holding throwable (backup to count detection)
+                if (wasHoldingThrowable && isEmptyHand && !hasCompletedThrow)
+                {
+                    Debug.Log("[BTS] ⚡⚡⚡ THROW COMPLETED (Empty hand detection)! Transition from throwable to empty hand.");
+                    OnThrowCompleted();
+                }
+                
+                wasHoldingThrowable = isHoldingThrowable;
+                
+                // Check throw timeout (fallback - if throw takes too long, assume it's done)
+                if (isThrowingInProgress && Time.time - throwStartTime > MAX_THROW_DURATION)
+                {
+                    Debug.Log("[BTS] ⏱️ Throw timeout reached, assuming throw completed");
+                    OnThrowCompleted();
+                    isThrowingInProgress = false;
+                }
+            }
+            else
+            {
+                // Not tracking throwable anymore - reset tracking states
+                wasHoldingThrowable = false;
+                isThrowingInProgress = false;
+                // Reset mouse button tracking when not holding throwable
+                wasMouseButton0Down = Input.GetMouseButton(0);
+            }
+            
+            // Monitor throwable items to detect throw completion (backup detection via item count)
+            MonitorThrowableItems();
         }
+        
 
         /// <summary>
         /// Print all items in the scene to verify we can access ItemStatsSystem.Item
@@ -101,11 +295,13 @@ namespace BetterThrowingSystem
         }
 
         /// <summary>
-        /// Scan player inventory slots (ALL slots) for throwable items and record slot numbers
+        /// Scan player inventory slots (ALL slots) for throwable items and group by TypeID (category)
         /// </summary>
         private void ScanPlayerInventoryForThrowables()
         {
-            throwableItemSlots.Clear();
+            throwableSlotsByTypeID.Clear();
+            throwableTypeIDsInOrder.Clear();
+            lastItemCounts.Clear();
             
             try
             {
@@ -120,7 +316,6 @@ namespace BetterThrowingSystem
                 var inventory = player.GetComponent<Inventory>();
                 if (inventory == null)
                 {
-                    // Try to find Inventory in children
                     inventory = player.GetComponentInChildren<Inventory>();
                 }
                 
@@ -136,20 +331,13 @@ namespace BetterThrowingSystem
                 var getItemMethod = inventoryType.GetMethod(
                     "GetItem",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                ) ?? inventoryType.GetMethod(
+                    "GetItemAt",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                ) ?? inventoryType.GetMethod(
+                    "GetSlotItem",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
                 );
-                
-                if (getItemMethod == null)
-                {
-                    Debug.LogWarning("[BTS] Inventory.GetItem method not found! Trying alternative methods...");
-                    // Try alternative method names
-                    getItemMethod = inventoryType.GetMethod(
-                        "GetItemAt",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                    ) ?? inventoryType.GetMethod(
-                        "GetSlotItem",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                    );
-                }
                 
                 if (getItemMethod == null)
                 {
@@ -157,46 +345,37 @@ namespace BetterThrowingSystem
                     return;
                 }
                 
-                // Try to get max slots or slot count
+                // Try to get max slots
                 var maxSlotsProp = inventoryType.GetProperty("maxSlots", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 var slotCountProp = inventoryType.GetProperty("SlotCount", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 var capacityProp = inventoryType.GetProperty("Capacity", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 var sizeProp = inventoryType.GetProperty("Size", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 
-                int maxSlots = 30; // Default to a larger number to scan more slots (backpack might have multiple rows)
+                int maxSlots = 47; // Default
                 if (maxSlotsProp != null)
                 {
                     var value = maxSlotsProp.GetValue(inventory);
                     if (value is int) maxSlots = (int)value;
-                    Debug.Log($"[BTS] Found maxSlots property: {maxSlots}");
                 }
                 else if (slotCountProp != null)
                 {
                     var value = slotCountProp.GetValue(inventory);
                     if (value is int) maxSlots = (int)value;
-                    Debug.Log($"[BTS] Found SlotCount property: {maxSlots}");
                 }
                 else if (capacityProp != null)
                 {
                     var value = capacityProp.GetValue(inventory);
                     if (value is int) maxSlots = (int)value;
-                    Debug.Log($"[BTS] Found Capacity property: {maxSlots}");
                 }
                 else if (sizeProp != null)
                 {
                     var value = sizeProp.GetValue(inventory);
                     if (value is int) maxSlots = (int)value;
-                    Debug.Log($"[BTS] Found Size property: {maxSlots}");
-                }
-                else
-                {
-                    Debug.LogWarning("[BTS] Could not find max slots property, defaulting to 30 slots");
                 }
                 
-                Debug.Log($"[BTS] Scanning ALL inventory slots 0-{maxSlots - 1} for throwables...");
+                Debug.Log($"[BTS] Scanning ALL inventory slots 0-{maxSlots - 1} for throwables (grouped by TypeID)...");
                 
-                // Scan ALL slots (not just 3-9)
-                // This will find throwables in all rows of the backpack
+                // Scan ALL slots and group by TypeID
                 for (int slotIndex = 0; slotIndex < maxSlots; slotIndex++)
                 {
                     try
@@ -204,32 +383,349 @@ namespace BetterThrowingSystem
                         var item = getItemMethod.Invoke(inventory, new object[] { slotIndex }) as Item;
                         if (item != null && IsThrowableItem(item))
                         {
-                            throwableItemSlots.Add(slotIndex);
-                            Debug.Log($"[BTS] Found throwable in slot {slotIndex}: {item.name} (TypeID: {item.TypeID})");
+                            int typeID = item.TypeID;
+                            
+                            // Group by TypeID
+                            if (!throwableSlotsByTypeID.ContainsKey(typeID))
+                            {
+                                throwableSlotsByTypeID[typeID] = new List<int>();
+                                throwableTypeIDsInOrder.Add(typeID);
+                            }
+                            throwableSlotsByTypeID[typeID].Add(slotIndex);
+                            
+                            // Store item count for throw detection
+                            lastItemCounts[slotIndex] = GetItemCount(item);
+                            
+                            Debug.Log($"[BTS] Found throwable in slot {slotIndex}: {item.name} (TypeID: {typeID})");
                         }
                     }
                     catch (System.Exception)
                     {
-                        // Silently skip slots that cause errors (they might not exist or be out of range)
-                        // This is normal for slots beyond the actual inventory size
+                        // Skip invalid slots
                     }
                 }
                 
-                // Sort slots for better UX (items will be cycled in order)
-                throwableItemSlots.Sort();
-                
-                Debug.Log($"[BTS] Scanned inventory: Found {throwableItemSlots.Count} throwable item(s) in slots: [{string.Join(", ", throwableItemSlots)}]");
-                
-                // Reset index if current slot is no longer in list
-                if (currentThrowableIndex >= throwableItemSlots.Count)
+                // Sort slots within each category
+                foreach (var typeID in throwableSlotsByTypeID.Keys.ToList())
                 {
-                    currentThrowableIndex = -1;
+                    throwableSlotsByTypeID[typeID].Sort();
+                }
+                
+                int totalCount = throwableSlotsByTypeID.Values.Sum(list => list.Count);
+                Debug.Log($"[BTS] Scanned inventory: Found {totalCount} throwable item(s) in {throwableTypeIDsInOrder.Count} category/categories: [{string.Join(", ", throwableTypeIDsInOrder.Select(id => $"TypeID {id}({throwableSlotsByTypeID[id].Count} slots)"))}]");
+                
+                // Reset category index if current category is no longer available
+                if (currentCategoryIndex >= throwableTypeIDsInOrder.Count)
+                {
+                    currentCategoryIndex = -1;
                 }
             }
             catch (System.Exception e)
             {
                 Debug.LogError($"[BTS] Error scanning inventory slots: {e.Message}\n{e.StackTrace}");
             }
+        }
+        
+        /// <summary>
+        /// Get all throwables grouped by TypeID (category) for selection mode
+        /// Each category appears only once, using the first slot found for that category
+        /// </summary>
+        private List<(int slot, int typeID, string name, Sprite icon)> GetAllThrowablesByCategory()
+        {
+            var result = new List<(int slot, int typeID, string name, Sprite icon)>();
+            var seenTypeIDs = new HashSet<int>();
+            
+            try
+            {
+                var player = FindPlayerCharacter();
+                if (player == null) return result;
+                
+                var inventory = player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>();
+                if (inventory == null) return result;
+                
+                var inventoryType = inventory.GetType();
+                var getItemMethod = inventoryType.GetMethod(
+                    "GetItem",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                ) ?? inventoryType.GetMethod(
+                    "GetItemAt",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                );
+                
+                if (getItemMethod == null) return result;
+                
+                // First pass: collect all throwables by TypeID
+                var throwablesByTypeID = new Dictionary<int, (int slot, string name, Sprite? icon)>();
+                
+                // Scan all slots (0-46) and group by TypeID
+                for (int slotIndex = 0; slotIndex < 47; slotIndex++)
+                {
+                    try
+                    {
+                        var item = getItemMethod.Invoke(inventory, new object[] { slotIndex }) as Item;
+                        if (item != null && IsThrowableItem(item))
+                        {
+                            int typeID = item.TypeID;
+                            
+                            // Only keep the first slot for each TypeID
+                            if (!throwablesByTypeID.ContainsKey(typeID))
+                            {
+                                string itemName = item.name.Replace("(Clone)", "").Trim();
+                                Sprite? icon = null;
+                                
+                                // Try to get icon
+                                try
+                                {
+                                    var itemType = item.GetType();
+                                    var iconProp = itemType.GetProperty("Icon", 
+                                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                                    if (iconProp != null)
+                                    {
+                                        icon = iconProp.GetValue(item) as Sprite;
+                                    }
+                                }
+                                catch { }
+                                
+                                throwablesByTypeID[typeID] = (slotIndex, itemName, icon);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+                
+                // Convert to list, sorted by TypeID order (if available) or slot index
+                if (throwableTypeIDsInOrder.Count > 0)
+                {
+                    // Use the category order from throwableTypeIDsInOrder
+                    foreach (var typeID in throwableTypeIDsInOrder)
+                    {
+                        if (throwablesByTypeID.ContainsKey(typeID))
+                        {
+                            var data = throwablesByTypeID[typeID];
+                            result.Add((data.slot, typeID, data.name, data.icon));
+                        }
+                    }
+                    
+                    // Add any remaining TypeIDs not in throwableTypeIDsInOrder
+                    foreach (var kvp in throwablesByTypeID)
+                    {
+                        if (!throwableTypeIDsInOrder.Contains(kvp.Key))
+                        {
+                            var data = kvp.Value;
+                            result.Add((data.slot, kvp.Key, data.name, data.icon));
+                        }
+                    }
+                }
+                else
+                {
+                    // No predefined order, just add all
+                    foreach (var kvp in throwablesByTypeID.OrderBy(x => x.Value.slot))
+                    {
+                        var data = kvp.Value;
+                        result.Add((data.slot, kvp.Key, data.name, data.icon));
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error getting throwables by category: {e.Message}");
+            }
+            
+            Debug.Log($"[BTS] Selection mode: Found {result.Count} throwable categories");
+            return result;
+        }
+        
+        /// <summary>
+        /// Handle mouse scroll wheel in selection mode (switches by category, not by slot)
+        /// </summary>
+        private void HandleSelectionModeScroll()
+        {
+            float scrollDelta = Input.GetAxis("Mouse ScrollWheel");
+            
+            if (Mathf.Abs(scrollDelta) > 0.01f)
+            {
+                var throwablesList = GetAllThrowablesByCategory();
+                if (throwablesList.Count == 0) return;
+                
+                if (scrollDelta > 0f)
+                {
+                    // Scroll up - move to previous category (wrap to end)
+                    selectionModeCurrentIndex--;
+                    if (selectionModeCurrentIndex < 0)
+                    {
+                        selectionModeCurrentIndex = throwablesList.Count - 1;
+                    }
+                    var selected = throwablesList[selectionModeCurrentIndex];
+                    Debug.Log($"[BTS] Selection mode: Scrolled UP to category '{selected.name}' (TypeID: {selected.typeID}, Slot: {selected.slot})");
+                }
+                else
+                {
+                    // Scroll down - move to next category (wrap to start)
+                    selectionModeCurrentIndex++;
+                    if (selectionModeCurrentIndex >= throwablesList.Count)
+                    {
+                        selectionModeCurrentIndex = 0;
+                    }
+                    var selected = throwablesList[selectionModeCurrentIndex];
+                    Debug.Log($"[BTS] Selection mode: Scrolled DOWN to category '{selected.name}' (TypeID: {selected.typeID}, Slot: {selected.slot})");
+                }
+                
+                // Show updated bubble
+                ShowSelectionModeBubble(throwablesList[selectionModeCurrentIndex]);
+            }
+        }
+        
+        /// <summary>
+        /// Show selection mode bubble with current throwable name and icon
+        /// </summary>
+        private void ShowSelectionModeBubble((int slot, int typeID, string name, Sprite? icon) throwable)
+        {
+            try
+            {
+                var player = FindPlayerCharacter();
+                Transform? target = player?.transform ?? Camera.main?.transform;
+                
+                if (target == null) return;
+                
+                // Format bubble text with icon indicator (Unicode icon if available)
+                string iconIndicator = throwable.icon != null ? "🎯" : "💣";
+                string bubbleText = $"投掷物选择中，{iconIndicator} {throwable.name}";
+                
+                Debug.Log($"[BTS] Showing selection bubble: {bubbleText} (Icon: {(throwable.icon != null ? "Available" : "None")})");
+                
+                // Show bubble using reflection
+                var showMethod = typeof(DialogueBubblesManager).GetMethod(
+                    "Show",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static
+                );
+                
+                if (showMethod != null)
+                {
+                    // Call Show with parameters (shorter duration for selection mode, updates frequently)
+                    var result = showMethod.Invoke(
+                        null,
+                        new object[] { bubbleText, target, 1f, false, false, -1f, 0.5f } // 0.5s duration
+                    );
+                    
+                    // Try to call Forget() on the result if it has that method
+                    if (result != null)
+                    {
+                        var forgetMethod = result.GetType().GetMethod("Forget");
+                        if (forgetMethod != null)
+                        {
+                            forgetMethod.Invoke(result, null);
+                        }
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error showing selection bubble: {e.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Exit selection mode and equip the selected throwable category
+        /// </summary>
+        private void ExitSelectionModeAndEquip()
+        {
+            if (!isInSelectionMode) return;
+            
+            try
+            {
+                var throwablesList = GetAllThrowablesByCategory();
+                if (throwablesList.Count == 0 || selectionModeCurrentIndex < 0 || selectionModeCurrentIndex >= throwablesList.Count)
+                {
+                    Debug.LogWarning("[BTS] Invalid selection index, cannot equip");
+                    isInSelectionMode = false;
+                    gKeyHoldTime = 0f;
+                    return;
+                }
+                
+                var selected = throwablesList[selectionModeCurrentIndex];
+                Debug.Log($"[BTS] =========================================");
+                Debug.Log($"[BTS] ========== EXITING SELECTION MODE ==========");
+                Debug.Log($"[BTS] Selected category: {selected.name} (Slot {selected.slot}, TypeID {selected.typeID})");
+                Debug.Log("[BTS] =========================================");
+                
+                var player = FindPlayerCharacter();
+                if (player == null)
+                {
+                    Debug.LogError("[BTS] Player not found, cannot equip selected throwable");
+                    isInSelectionMode = false;
+                    gKeyHoldTime = 0f;
+                    return;
+                }
+                
+                // Save current weapon before switching
+                SaveCurrentEquippedSlot(player);
+                
+                // Equip the selected throwable (first slot of the category)
+                if (SwitchToSlot(selected.slot))
+                {
+                    lastEquippedThrowableSlot = selected.slot;
+                    lastSelectedThrowableSlot = selected.slot;
+                    lastSelectedThrowableTypeID = selected.typeID;
+                    
+                    // Update category index
+                    if (throwableTypeIDsInOrder.Contains(selected.typeID))
+                    {
+                        currentCategoryIndex = throwableTypeIDsInOrder.IndexOf(selected.typeID);
+                    }
+                    
+                    // Show confirmation bubble with icon indicator
+                    string iconIndicator = selected.icon != null ? "🎯" : "💣";
+                    ShowDebugBubble($"✓ 已选择：{iconIndicator} {selected.name}");
+                    
+                    Debug.Log($"[BTS] ✓ Successfully equipped selected throwable category: {selected.name}");
+                }
+                else
+                {
+                    ShowDebugBubble($"❌ 无法装备：{selected.name}");
+                    Debug.LogError($"[BTS] Failed to equip selected throwable: {selected.name}");
+                }
+                
+                // Exit selection mode
+                isInSelectionMode = false;
+                gKeyHoldTime = 0f;
+                lastActionWasGKey = true;
+                lastActionWasWeaponSwitch = false;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error exiting selection mode: {e.Message}\n{e.StackTrace}");
+                isInSelectionMode = false;
+                gKeyHoldTime = 0f;
+            }
+        }
+        
+        /// <summary>
+        /// Get item count/stack size (for detecting throw completion)
+        /// </summary>
+        private int GetItemCount(Item item)
+        {
+            if (item == null) return 0;
+            
+            try
+            {
+                var itemType = item.GetType();
+                
+                // Try to get Count or StackSize property
+                var countProp = itemType.GetProperty("Count", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? itemType.GetProperty("StackSize", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? itemType.GetProperty("Amount", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                
+                if (countProp != null)
+                {
+                    var value = countProp.GetValue(item);
+                    if (value is int) return (int)value;
+                    if (value != null && int.TryParse(value.ToString(), out int parsed)) return parsed;
+                }
+            }
+            catch { }
+            
+            // Default: item exists = count 1
+            return 1;
         }
         
         /// <summary>
@@ -758,7 +1254,7 @@ namespace BetterThrowingSystem
                             var _slotsProperty = inventoryType.GetProperty("_slots", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                             var _slotsField = inventoryType.GetField("_slots", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                             
-                            object slots = null;
+                            object? slots = null;
                             if (slotsProperty != null)
                             {
                                 slots = slotsProperty.GetValue(inventory);
@@ -782,9 +1278,8 @@ namespace BetterThrowingSystem
                             
                             if (slots != null)
                             {
-                                if (slots is System.Collections.IList)
+                                if (slots is System.Collections.IList slotsList)
                                 {
-                                    var slotsList = slots as System.Collections.IList;
                                     Debug.Log($"[BTS] Found slots list with {slotsList.Count} slots");
                                     
                                     if (slotNumber >= 0 && slotNumber < slotsList.Count)
@@ -1051,92 +1546,867 @@ namespace BetterThrowingSystem
         }
         
         /// <summary>
-        /// Cycle to the next throwable slot and switch to it
+        /// Cycle to the next throwable slot and switch to it (with memory system and category-based switching)
         /// </summary>
         private void CycleToNextThrowable()
         {
-            // Rescan inventory slots to get up-to-date list
+            var player = FindPlayerCharacter();
+            if (player == null)
+            {
+                Debug.LogError("[BTS] Player character not found!");
+                return;
+            }
+            
+            // NOTE: SaveCurrentEquippedSlot is now called BEFORE CycleToNextThrowable in Update()
+            // This ensures we save the weapon BEFORE any item changes
+            
+            // Rescan inventory slots to get up-to-date list (grouped by TypeID)
             ScanPlayerInventoryForThrowables();
             
-            if (throwableItemSlots.Count == 0)
+            if (throwableTypeIDsInOrder.Count == 0)
             {
                 Debug.LogWarning("[BTS] No throwable items found in inventory slots!");
                 ShowDebugBubble("❌ 背包中没有投掷物");
                 return;
             }
             
-            // Move to next slot in the list (cycle back to start if at end)
-            currentThrowableIndex = (currentThrowableIndex + 1) % throwableItemSlots.Count;
+            // Determine which throwable to select
+            int targetSlot;
+            int targetTypeID;
+            string categoryInfo;
             
-            int targetSlot = throwableItemSlots[currentThrowableIndex];
+            // Logic:
+            // 1. If throw was completed, move to next category
+            // 2. If current equipped item is the last selected throwable and not thrown, move to next category (continuous G press)
+            // 3. Otherwise, restore last selection or select first category
             
-            Debug.Log($"[BTS] Switching to throwable slot {targetSlot} [{currentThrowableIndex + 1}/{throwableItemSlots.Count}]");
+            // Check if currently equipped item is the last selected throwable
+            bool isCurrentlyEquipped = lastEquippedThrowableSlot.HasValue && 
+                                      lastSelectedThrowableSlot.HasValue &&
+                                      lastEquippedThrowableSlot.Value == lastSelectedThrowableSlot.Value;
             
+            // NEW LOGIC: Smart throwable selection based on completion and continuity
+            // Rule 1: If throw completed AND continuous G key (last action was G), move to next category
+            // Rule 2: If throw NOT completed, always restore last selection (even if continuous G)
+            // Rule 3: If last action was weapon switch, restore last selection (user canceled throw)
+            // Rule 4: If no last selection, start from first category
+            
+            bool isContinuousG = lastActionWasGKey && !lastActionWasWeaponSwitch;
+            bool shouldSwitchCategory = hasCompletedThrow && isContinuousG;
+            
+            Debug.Log($"[BTS] Selection logic - hasCompletedThrow: {hasCompletedThrow}, isContinuousG: {isContinuousG}, shouldSwitchCategory: {shouldSwitchCategory}, lastActionWasWeaponSwitch: {lastActionWasWeaponSwitch}");
+            
+            if (shouldSwitchCategory)
+            {
+                // Rule 1: Throw completed + continuous G = move to next category
+                currentCategoryIndex = (currentCategoryIndex + 1) % throwableTypeIDsInOrder.Count;
+                targetTypeID = throwableTypeIDsInOrder[currentCategoryIndex];
+                var slotsForCategory = throwableSlotsByTypeID[targetTypeID];
+                targetSlot = slotsForCategory[0];
+                
+                // Update memory
+                lastSelectedThrowableSlot = targetSlot;
+                lastSelectedThrowableTypeID = targetTypeID;
+                
+                categoryInfo = $"[类别 {currentCategoryIndex + 1}/{throwableTypeIDsInOrder.Count}]";
+                Debug.Log($"[BTS] ✓ Continuous G after throw completed, moving to next category: TypeID {targetTypeID}, slot {targetSlot}");
+                
+                // Reset throw completion flag
+                hasCompletedThrow = false;
+            }
+            else if (isCurrentlyEquipped && lastSelectedThrowableTypeID.HasValue && isContinuousG)
+            {
+                // Currently equipped is last selected throwable, continuous G press, but throw NOT completed
+                // This means user is pressing G continuously but hasn't thrown yet
+                // Move to next category only if continuous G (user wants to cycle)
+                int lastTypeID = lastSelectedThrowableTypeID.Value;
+                int currentCatIndex = throwableTypeIDsInOrder.IndexOf(lastTypeID);
+                if (currentCatIndex < 0) currentCatIndex = 0;
+                
+                currentCategoryIndex = (currentCatIndex + 1) % throwableTypeIDsInOrder.Count;
+                targetTypeID = throwableTypeIDsInOrder[currentCategoryIndex];
+                var slotsForCategory = throwableSlotsByTypeID[targetTypeID];
+                targetSlot = slotsForCategory[0];
+                
+                lastSelectedThrowableSlot = targetSlot;
+                lastSelectedThrowableTypeID = targetTypeID;
+                
+                categoryInfo = $"[类别 {currentCategoryIndex + 1}/{throwableTypeIDsInOrder.Count}]";
+                Debug.Log($"[BTS] ✓ Continuous G press (no throw completed), moving to next category: TypeID {targetTypeID}, slot {targetSlot}");
+            }
+            else if (lastSelectedThrowableSlot.HasValue && lastSelectedThrowableTypeID.HasValue)
+            {
+                // Rule 2 & 3: Restore last selection (throw not completed OR weapon was switched)
+                int lastTypeID = lastSelectedThrowableTypeID.Value;
+                int lastSlot = lastSelectedThrowableSlot.Value;
+                
+                if (throwableSlotsByTypeID.ContainsKey(lastTypeID) && 
+                    throwableSlotsByTypeID[lastTypeID].Contains(lastSlot))
+                {
+                    // Restore last selection (user canceled throw or switched weapon)
+                    targetSlot = lastSlot;
+                    targetTypeID = lastTypeID;
+                    
+                    // Find category index
+                    currentCategoryIndex = throwableTypeIDsInOrder.IndexOf(targetTypeID);
+                    if (currentCategoryIndex < 0) currentCategoryIndex = 0;
+                    
+                    string reason = lastActionWasWeaponSwitch ? "武器切换后恢复" : "未完成投掷，恢复上次选择";
+                    categoryInfo = $"[{reason}]";
+                    Debug.Log($"[BTS] ✓ {reason}: TypeID {targetTypeID}, slot {targetSlot}");
+                }
+                else
+                {
+                    // Last selection no longer exists, start from first category
+                    currentCategoryIndex = 0;
+                    targetTypeID = throwableTypeIDsInOrder[currentCategoryIndex];
+                    var slotsForCategory = throwableSlotsByTypeID[targetTypeID];
+                    targetSlot = slotsForCategory[0];
+                    
+                    lastSelectedThrowableSlot = targetSlot;
+                    lastSelectedThrowableTypeID = targetTypeID;
+                    
+                    categoryInfo = $"[类别 {currentCategoryIndex + 1}/{throwableTypeIDsInOrder.Count}]";
+                    Debug.Log($"[BTS] Last selection unavailable, starting from first category: TypeID {targetTypeID}, slot {targetSlot}");
+                }
+            }
+            else
+            {
+                // First time, select first category
+                currentCategoryIndex = 0;
+                targetTypeID = throwableTypeIDsInOrder[0];
+                var slotsForCategory = throwableSlotsByTypeID[targetTypeID];
+                targetSlot = slotsForCategory[0];
+                
+                lastSelectedThrowableSlot = targetSlot;
+                lastSelectedThrowableTypeID = targetTypeID;
+                
+                categoryInfo = $"[类别 1/{throwableTypeIDsInOrder.Count}]";
+                Debug.Log($"[BTS] First selection: TypeID {targetTypeID}, slot {targetSlot}");
+            }
+            
+            // Safety check: ensure player is in a safe state
+            if (!IsPlayerSafeToSwitch(player))
+            {
+                Debug.LogWarning("[BTS] Player is not in a safe state to switch items - operation cancelled");
+                ShowDebugBubble("⚠️ 当前状态无法切换");
+                return;
+            }
+            
+            // Get item name for bubble display
+            string itemName = $"Slot {targetSlot}";
+            try
+            {
+                var inventory = player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>();
+                if (inventory != null)
+                {
+                    var inventoryType = inventory.GetType();
+                    var getItemMethod = inventoryType.GetMethod(
+                        "GetItem",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    ) ?? inventoryType.GetMethod(
+                        "GetItemAt",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    );
+                    
+                    if (getItemMethod != null)
+                    {
+                        var item = getItemMethod.Invoke(inventory, new object[] { targetSlot }) as Item;
+                        if (item != null)
+                        {
+                            itemName = item.name.Replace("(Clone)", "").Trim();
+                        }
+                    }
+                }
+            }
+            catch { }
+            
+            // Switch to the slot (simulates pressing number key)
+            if (SwitchToSlot(targetSlot))
+            {
+                lastEquippedThrowableSlot = targetSlot;
+                
+                // Show success bubble
+                var target = player.transform ?? Camera.main?.transform;
+                if (target != null)
+                {
+                    ShowDebugBubble($"💣 {categoryInfo} {itemName}");
+                }
+            }
+            else
+            {
+                ShowDebugBubble("❌ 无法切换到槽位");
+            }
+        }
+        
+        /// <summary>
+        /// Save current equipped slot (weapon) before switching to throwable
+        /// NEW APPROACH: Use CurrentHoldItemAgent to get current item, then find its slot via characterItem.Slots
+        /// Based on duckovAPI documentation: CurrentHoldItemAgent.Item and characterItem.Slots
+        /// </summary>
+        private void SaveCurrentEquippedSlot(CharacterMainControl player)
+        {
+            try
+            {
+                Debug.Log("[BTS] ========== SaveCurrentEquippedSlot CALLED ==========");
+                
+                // NEW METHOD: Try to get current item from CurrentHoldItemAgent (recommended by duckovAPI)
+                Item? currentItem = null;
+                
+                try
+                {
+                    var playerType = player.GetType();
+                    var currentHoldItemAgentProp = playerType.GetProperty("CurrentHoldItemAgent", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    
+                    if (currentHoldItemAgentProp != null)
+                    {
+                        var agent = currentHoldItemAgentProp.GetValue(player);
+                        if (agent != null)
+                        {
+                            var agentType = agent.GetType();
+                            var itemProp = agentType.GetProperty("Item", 
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                            if (itemProp != null)
+                            {
+                                currentItem = itemProp.GetValue(agent) as Item;
+                                Debug.Log($"[BTS] Got current item from CurrentHoldItemAgent.Item: {(currentItem != null ? currentItem.name : "null")}");
+                            }
+                        }
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Debug.Log($"[BTS] Error getting item from CurrentHoldItemAgent: {e.Message}");
+                }
+                
+                // Fallback: Try GetCurrentHoldItem if CurrentHoldItemAgent failed
+                if (currentItem == null)
+                {
+                    currentItem = GetCurrentHoldItem(player);
+                    Debug.Log($"[BTS] Got current item from GetCurrentHoldItem (fallback): {(currentItem != null ? currentItem.name : "null")}");
+                }
+                
+                bool isCurrentlyHoldingThrowable = currentItem != null && IsThrowableItem(currentItem);
+                Debug.Log($"[BTS] Current item: {(currentItem != null ? currentItem.name : "null")}, IsThrowable: {isCurrentlyHoldingThrowable}");
+                
+                // Skip if we're already holding a throwable AND we already have a saved weapon (don't overwrite)
+                if (isCurrentlyHoldingThrowable && previousEquippedSlotHash.HasValue)
+                {
+                    Debug.Log("[BTS] Currently holding throwable and previous weapon already saved, not overwriting");
+                    Debug.Log($"[BTS] Previous weapon (already saved): SlotHash {previousEquippedSlotHash}, SlotKey '{previousEquippedSlotKey}', Slot {previousEquippedSlot}, Key {previousEquippedKey}");
+                    return;
+                }
+                
+                // METHOD 1: If we have currentItem, find which slot it's in via characterItem.Slots
+                // This is the most reliable method according to duckovAPI
+                if (currentItem != null && !IsThrowableItem(currentItem))
+                {
+                    try
+                    {
+                        var playerType = player.GetType();
+                        var characterItemProp = playerType.GetProperty("CharacterItem", 
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                        
+                        if (characterItemProp != null)
+                        {
+                            var characterItem = characterItemProp.GetValue(player) as Item;
+                            if (characterItem != null)
+                            {
+                                var itemType = characterItem.GetType();
+                                var slotsProp = itemType.GetProperty("Slots", 
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                                
+                                if (slotsProp != null)
+                                {
+                                    var slots = slotsProp.GetValue(characterItem);
+                                    if (slots != null)
+                                    {
+                                        var slotsType = slots.GetType();
+                                        // Try to get slot by enumerating through all slots
+                                        var getEnumeratorMethod = slotsType.GetMethod("GetEnumerator", 
+                                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                        
+                                        if (getEnumeratorMethod != null)
+                                        {
+                                            var enumerator = getEnumeratorMethod.Invoke(slots, null);
+                                            var moveNextMethod = enumerator.GetType().GetMethod("MoveNext");
+                                            var currentProperty = enumerator.GetType().GetProperty("Current");
+                                            
+                                            if (moveNextMethod != null && currentProperty != null)
+                                            {
+                                                while ((bool)moveNextMethod.Invoke(enumerator, null))
+                                                {
+                                                    var slot = currentProperty.GetValue(enumerator);
+                                                    if (slot != null)
+                                                    {
+                                                        var slotType = slot.GetType();
+                                                        var contentProp = slotType.GetProperty("Content", 
+                                                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                                                        var keyProp = slotType.GetProperty("Key", 
+                                                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                                                        
+                                                        if (contentProp != null && keyProp != null)
+                                                        {
+                                                            var slotContent = contentProp.GetValue(slot) as Item;
+                                                            var slotKey = keyProp.GetValue(slot) as string;
+                                                            
+                                                            if (slotContent == currentItem && slotKey != null)
+                                                            {
+                                                                // Found the slot containing current item!
+                                                                // Save the slot hash for equipment slot switching (CRITICAL: This is equipment slot, not inventory slot!)
+                                                                int slotHash = slotKey.GetHashCode();
+                                                                previousEquippedSlotHash = slotHash;
+                                                                previousEquippedSlotKey = slotKey;
+                                                                
+                                                                // Also save slot number for compatibility (if it's "1" or "2")
+                                                                if (int.TryParse(slotKey, out int slotNum) && slotNum >= 1 && slotNum <= 2)
+                                                                {
+                                                                    previousEquippedSlot = slotNum;
+                                                                    previousEquippedKey = KeyCode.Alpha1 + (slotNum - 1);
+                                                                    Debug.Log($"[BTS] ✓✓✓ Saved EQUIPMENT weapon slot: Key='{slotKey}', Hash={slotHash}, SlotNum={slotNum} ({currentItem.name})");
+                                                                }
+                                                                else if (slotKey == "V" || slotKey == "0")
+                                                                {
+                                                                    previousEquippedSlot = null;
+                                                                    previousEquippedKey = KeyCode.V;
+                                                                    Debug.Log($"[BTS] ✓✓✓ Saved EQUIPMENT weapon slot: Key='{slotKey}', Hash={slotHash} ({currentItem.name})");
+                                                                }
+                                                                else
+                                                                {
+                                                                    previousEquippedSlot = null;
+                                                                    previousEquippedKey = null;
+                                                                    Debug.Log($"[BTS] ✓✓✓ Saved EQUIPMENT weapon slot: Key='{slotKey}', Hash={slotHash} ({currentItem.name})");
+                                                                }
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.Log($"[BTS] Error finding slot via CharacterItem.Slots: {e.Message}");
+                    }
+                }
+                
+                // METHOD 2: Check inventory slots 1 and 2 for weapons (even if HoldItem is null)
+                // This handles the case where player has weapon in slot 1/2 but isn't currently holding it
+                var inventory = player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>();
+                if (inventory != null)
+                {
+                    var inventoryType = inventory.GetType();
+                    var getItemMethod = inventoryType.GetMethod(
+                        "GetItem",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    ) ?? inventoryType.GetMethod(
+                        "GetItemAt",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    );
+                    
+                    if (getItemMethod != null)
+                    {
+                        Debug.Log("[BTS] Method 2: Checking inventory slots 1 and 2 for weapons...");
+                        
+                        // Check slots 1 and 2 for any non-throwable weapon
+                        int[] weaponSlotsOnly = { 1, 2 };
+                        foreach (int slotIndex in weaponSlotsOnly)
+                        {
+                            try
+                            {
+                                var item = getItemMethod.Invoke(inventory, new object[] { slotIndex }) as Item;
+                                if (item != null && !IsThrowableItem(item))
+                                {
+                                    // Found a weapon in slot 1 or 2!
+                                    previousEquippedSlot = slotIndex;
+                                    previousEquippedKey = KeyCode.Alpha1 + (slotIndex - 1);
+                                    Debug.Log($"[BTS] ✓✓✓ Saved weapon slot (Method 2, found in inventory): {slotIndex} ({item.name}) (Key: {previousEquippedKey})");
+                                    return;
+                                }
+                            }
+                            catch (System.Exception e)
+                            {
+                                Debug.Log($"[BTS] Error checking slot {slotIndex}: {e.Message}");
+                            }
+                        }
+                        
+                        Debug.Log("[BTS] Method 2: No weapon found in slots 1 or 2");
+                    }
+                }
+                
+                // Final fallback: If still nothing saved, assume slot 1 (most common weapon slot)
+                if (!previousEquippedSlotHash.HasValue)
+                {
+                    Debug.Log("[BTS] ⚠ No weapon found in equipment slots. Will use equipment slot '1' as fallback when switching back.");
+                    // Don't save here - let AutoSwitchBackToWeaponImmediately handle fallback
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error saving current equipped slot: {e.Message}\n{e.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// Get current hold item from player
+        /// NEW: Try CurrentHoldItemAgent.Item first (recommended by duckovAPI), then fallback to direct properties
+        /// </summary>
+        private Item? GetCurrentHoldItem(CharacterMainControl player)
+        {
+            if (player == null) return null;
+            
+            try
+            {
+                // Method 1: Try CurrentHoldItemAgent.Item (recommended by duckovAPI)
+                var playerType = player.GetType();
+                var currentHoldItemAgentProp = playerType.GetProperty("CurrentHoldItemAgent", 
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                
+                if (currentHoldItemAgentProp != null)
+                {
+                    var agent = currentHoldItemAgentProp.GetValue(player);
+                    if (agent != null)
+                    {
+                        var agentType = agent.GetType();
+                        var itemProp = agentType.GetProperty("Item", 
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                        if (itemProp != null)
+                        {
+                            var item = itemProp.GetValue(agent) as Item;
+                            if (item != null)
+                            {
+                                return item;
+                            }
+                        }
+                    }
+                }
+                
+                // Method 2: Fallback to direct properties
+                var holdItemProp = playerType.GetProperty("HoldItem", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? playerType.GetProperty("CurrentItem", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? playerType.GetProperty("EquippedItem", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                
+                if (holdItemProp != null)
+                {
+                    return holdItemProp.GetValue(player) as Item;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[BTS] Error getting current hold item: {e.Message}");
+            }
+            
+            return null;
+        }
+        
+        /// <summary>
+        /// Monitor throwable items to detect throw completion (check item count changes)
+        /// </summary>
+        private void MonitorThrowableItems()
+        {
+            if (!lastEquippedThrowableSlot.HasValue) return; // No throwable equipped
+            
+            try
+            {
+                var player = FindPlayerCharacter();
+                if (player == null) return;
+                
+                var inventory = player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>();
+                if (inventory == null) return;
+                
+                var inventoryType = inventory.GetType();
+                var getItemMethod = inventoryType.GetMethod(
+                    "GetItem",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                ) ?? inventoryType.GetMethod(
+                    "GetItemAt",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                );
+                
+                if (getItemMethod == null) return;
+                
+                int monitoredSlot = lastEquippedThrowableSlot.Value;
+                
+                // Get current item from slot
+                var item = getItemMethod.Invoke(inventory, new object[] { monitoredSlot }) as Item;
+                
+                // Check if item still exists and get current count
+                int currentCount = 0;
+                if (item != null && IsThrowableItem(item))
+                {
+                    currentCount = GetItemCount(item);
+                }
+                // If item is null, count is 0 (item was removed/thrown)
+                
+                // Check if count decreased (throw completed) - PRIMARY DETECTION METHOD
+                if (lastItemCounts.ContainsKey(monitoredSlot))
+                {
+                    int lastCount = lastItemCounts[monitoredSlot];
+                    if (currentCount < lastCount)
+                    {
+                        // Item count decreased - throw completed!
+                        Debug.Log($"[BTS] ⚡⚡⚡ THROW COMPLETED (Count change)! Slot {monitoredSlot}: {lastCount} -> {currentCount}");
+                        lastItemCounts[monitoredSlot] = currentCount;
+                        OnThrowCompleted();
+                    }
+                    else if (currentCount != lastCount)
+                    {
+                        // Count changed but increased (item added/stacked)
+                        lastItemCounts[monitoredSlot] = currentCount;
+                    }
+                }
+                else if (item != null)
+                {
+                    // First time monitoring this slot - initialize count
+                    lastItemCounts[monitoredSlot] = currentCount;
+                    Debug.Log($"[BTS] 📊 Started monitoring throwable slot {monitoredSlot}, initial count: {currentCount}");
+                    isThrowingInProgress = false; // Reset throw tracking
+                }
+                else
+                {
+                    // Item was removed (fully consumed)
+                    if (lastItemCounts.ContainsKey(monitoredSlot) && lastItemCounts[monitoredSlot] > 0)
+                    {
+                        Debug.Log($"[BTS] ⚡⚡⚡ THROW COMPLETED (Item removed)! Slot {monitoredSlot} item completely consumed");
+                        OnThrowCompleted();
+                    }
+                    lastItemCounts[monitoredSlot] = 0;
+                }
+                
+                // Note: Throw detection is primarily done by count change above
+                // The count decrease detection in the main check above will trigger OnThrowCompleted()
+                
+                // Check if player manually switched to a non-throwable item (clear monitoring)
+                // BUT: Don't clear if we just completed a throw (isThrowingInProgress or hasCompletedThrow)
+                // This prevents false detection when auto-switching back to weapon after throw
+                if ((item == null || !IsThrowableItem(item)) && !hasCompletedThrow && !isThrowingInProgress)
+                {
+                    // Player manually switched away from throwable (not after throw completion)
+                    if (lastEquippedThrowableSlot == monitoredSlot)
+                    {
+                        Debug.Log($"[BTS] Player manually switched away from throwable slot {monitoredSlot}, clearing monitoring");
+                        lastEquippedThrowableSlot = null;
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                // Silently ignore errors in monitoring
+                Debug.LogWarning($"[BTS] Error monitoring throwable items: {e.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Auto-switch back to weapon immediately after throw
+        /// UPDATED: Use SwitchHoldAgentInSlot with equipment slot hash (not inventory slot!)
+        /// </summary>
+        private void AutoSwitchBackToWeaponImmediately()
+        {
             try
             {
                 var player = FindPlayerCharacter();
                 if (player == null)
                 {
-                    Debug.LogError("[BTS] Player character not found!");
+                    Debug.LogError("[BTS] ❌ Cannot switch back: Player not found");
                     return;
                 }
                 
-                // Safety check: ensure player is in a safe state
-                if (!IsPlayerSafeToSwitch(player))
-                {
-                    Debug.LogWarning("[BTS] Player is not in a safe state to switch items - operation cancelled");
-                    ShowDebugBubble("⚠️ 当前状态无法切换");
-                    return;
-                }
+                Debug.Log($"[BTS] ⚡⚡⚡ AutoSwitchBackToWeaponImmediately CALLED");
+                Debug.Log($"[BTS] Previous weapon - SlotHash: {previousEquippedSlotHash}, SlotKey: '{previousEquippedSlotKey}', Slot: {previousEquippedSlot}, Key: {previousEquippedKey}");
                 
-                // Get item name for bubble display
-                string itemName = $"Slot {targetSlot}";
-                try
+                // Method 1 (PRIORITY): Use SwitchHoldAgentInSlot with equipment slot hash
+                // This is the correct way to switch equipment slots, not inventory slots!
+                if (previousEquippedSlotHash.HasValue)
                 {
-                    var inventory = player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>();
-                    if (inventory != null)
+                    int slotHash = previousEquippedSlotHash.Value;
+                    Debug.Log($"[BTS] ⚡ Switching back to EQUIPMENT slot using SwitchHoldAgentInSlot(slotHash={slotHash}, key='{previousEquippedSlotKey}')");
+                    
+                    try
                     {
-                        var inventoryType = inventory.GetType();
-                        var getItemMethod = inventoryType.GetMethod(
-                            "GetItem",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                        ) ?? inventoryType.GetMethod(
-                            "GetItemAt",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                        );
+                        var playerType = player.GetType();
+                        var switchMethod = playerType.GetMethod("SwitchHoldAgentInSlot",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                            null,
+                            new System.Type[] { typeof(int) },
+                            null);
                         
-                        if (getItemMethod != null)
+                        if (switchMethod != null)
                         {
-                            var item = getItemMethod.Invoke(inventory, new object[] { targetSlot }) as Item;
-                            if (item != null)
-                            {
-                                itemName = item.name.Replace("(Clone)", "").Trim();
-                            }
+                            switchMethod.Invoke(player, new object[] { slotHash });
+                            lastEquippedThrowableSlot = null;
+                            Debug.Log($"[BTS] ✓✓✓ Successfully switched back to EQUIPMENT slot via SwitchHoldAgentInSlot (hash={slotHash}, key='{previousEquippedSlotKey}')");
+                            return;
+                        }
+                        else
+                        {
+                            Debug.LogWarning("[BTS] SwitchHoldAgentInSlot method not found, falling back to key simulation");
                         }
                     }
-                }
-                catch { }
-                
-                // Switch to the slot (simulates pressing number key)
-                if (SwitchToSlot(targetSlot))
-                {
-                    // Show success bubble
-                    var target = player.transform ?? Camera.main?.transform;
-                    if (target != null)
+                    catch (System.Exception e)
                     {
-                        ShowDebugBubble($"💣 [{currentThrowableIndex + 1}/{throwableItemSlots.Count}] {itemName}");
+                        Debug.LogError($"[BTS] Error calling SwitchHoldAgentInSlot: {e.Message}");
+                    }
+                }
+                
+                // Method 2: Try to simulate key press (fallback)
+                if (previousEquippedKey.HasValue)
+                {
+                    Debug.Log($"[BTS] ⚡ Attempting to simulate key press: {previousEquippedKey.Value}");
+                    if (SimulateKeyPress(previousEquippedKey.Value))
+                    {
+                        lastEquippedThrowableSlot = null;
+                        Debug.Log($"[BTS] ✓ Successfully switched back via key press: {previousEquippedKey.Value}");
+                        return;
+                    }
+                }
+                
+                // Method 3: Try SwitchToSlot with slot number (last resort, might switch inventory instead of equipment)
+                if (previousEquippedSlot.HasValue)
+                {
+                    if (!IsPlayerSafeToSwitch(player))
+                    {
+                        Debug.LogWarning("[BTS] Player not safe to switch, will retry in next frame");
+                        StartCoroutine(RetryAutoSwitchBack());
+                        return;
+                    }
+                    
+                    int weaponSlot = previousEquippedSlot.Value;
+                    Debug.Log($"[BTS] ⚠ Fallback: Auto-switching using SwitchToSlot (slot {weaponSlot}) - WARNING: This might switch inventory slot, not equipment slot!");
+                    
+                    if (SwitchToSlot(weaponSlot))
+                    {
+                        lastEquippedThrowableSlot = null;
+                        Debug.Log($"[BTS] ✓ Successfully switched back to weapon slot {weaponSlot} (fallback)");
+                        return;
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[BTS] Failed to switch back to weapon slot {weaponSlot}, will retry");
+                        StartCoroutine(RetryAutoSwitchBack());
                     }
                 }
                 else
                 {
-                    ShowDebugBubble("❌ 无法切换到槽位");
+                    // Final fallback: Try equipment slot hash for "1" and "2"
+                    Debug.LogWarning("[BTS] ⚠ No previous weapon slot hash saved, trying equipment slots '1' and '2'...");
+                    
+                    // Try slot "1" hash
+                    int slot1Hash = "1".GetHashCode();
+                    try
+                    {
+                        var playerType = player.GetType();
+                        var switchMethod = playerType.GetMethod("SwitchHoldAgentInSlot",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                            null,
+                            new System.Type[] { typeof(int) },
+                            null);
+                        
+                        if (switchMethod != null)
+                        {
+                            switchMethod.Invoke(player, new object[] { slot1Hash });
+                            lastEquippedThrowableSlot = null;
+                            Debug.Log("[BTS] ✓ Successfully switched back via fallback (equipment slot '1')");
+                            return;
+                        }
+                    }
+                    catch { }
+                    
+                    // Try slot "2" hash
+                    int slot2Hash = "2".GetHashCode();
+                    try
+                    {
+                        var playerType = player.GetType();
+                        var switchMethod = playerType.GetMethod("SwitchHoldAgentInSlot",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+                            null,
+                            new System.Type[] { typeof(int) },
+                            null);
+                        
+                        if (switchMethod != null)
+                        {
+                            switchMethod.Invoke(player, new object[] { slot2Hash });
+                            lastEquippedThrowableSlot = null;
+                            Debug.Log("[BTS] ✓ Successfully switched back via fallback (equipment slot '2')");
+                            return;
+                        }
+                    }
+                    catch { }
+                    
+                    Debug.LogError("[BTS] ❌ All methods failed to switch back to weapon");
                 }
             }
             catch (System.Exception e)
             {
-                Debug.LogError($"[BTS] Error switching throwable slot: {e.Message}\n{e.StackTrace}");
-                ShowDebugBubble($"❌ 错误：{e.Message.Substring(0, Math.Min(30, e.Message.Length))}...");
+                Debug.LogError($"[BTS] Error in AutoSwitchBackToWeaponImmediately: {e.Message}\n{e.StackTrace}");
             }
+        }
+        
+        /// <summary>
+        /// Simulate key press by finding and calling the input handler method
+        /// </summary>
+        private bool SimulateKeyPress(KeyCode keyCode)
+        {
+            try
+            {
+                var player = FindPlayerCharacter();
+                if (player == null) return false;
+                
+                var playerType = player.GetType();
+                
+                // Try to find Update or input handling methods that check for this key
+                // Common pattern: if (Input.GetKeyDown(KeyCode.Alpha1)) { SwitchToSlot(1); }
+                // We need to find the method that handles this key and call it directly
+                
+                // Look for methods that might handle key input
+                var allMethods = playerType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                
+                foreach (var method in allMethods)
+                {
+                    // Try methods that accept KeyCode or int (slot number)
+                    var parameters = method.GetParameters();
+                    if (parameters.Length == 1)
+                    {
+                        if (parameters[0].ParameterType == typeof(KeyCode))
+                        {
+                            try
+                            {
+                                Debug.Log($"[BTS] Trying to call {method.Name}({keyCode})...");
+                                method.Invoke(player, new object[] { keyCode });
+                                Debug.Log($"[BTS] ✓ Called {method.Name}({keyCode})");
+                                return true;
+                            }
+                            catch { }
+                        }
+                        else if (parameters[0].ParameterType == typeof(int))
+                        {
+                            // Map KeyCode to slot number
+                            int slotNum = -1;
+                            if (keyCode >= KeyCode.Alpha1 && keyCode <= KeyCode.Alpha9)
+                            {
+                                slotNum = (keyCode - KeyCode.Alpha1) + 1;
+                            }
+                            else if (keyCode == KeyCode.V)
+                            {
+                                slotNum = 0;
+                            }
+                            
+                            if (slotNum >= 0)
+                            {
+                                try
+                                {
+                                    Debug.Log($"[BTS] Trying to call {method.Name}({slotNum}) for key {keyCode}...");
+                                    method.Invoke(player, new object[] { slotNum });
+                                    Debug.Log($"[BTS] ✓ Called {method.Name}({slotNum})");
+                                    return true;
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+                
+                Debug.LogWarning($"[BTS] Could not find method to simulate key press: {keyCode}");
+                return false;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[BTS] Error simulating key press: {e.Message}");
+                return false;
+            }
+        }
+        
+        /// <summary>
+        /// Called when throw is detected as completed
+        /// </summary>
+        private void OnThrowCompleted()
+        {
+            if (hasCompletedThrow) return; // Already processed
+            
+            Debug.Log("[BTS] ========== ON THROW COMPLETED CALLED ==========");
+            Debug.Log($"[BTS] Previous weapon - Slot: {previousEquippedSlot}, Key: {previousEquippedKey}");
+            Debug.Log($"[BTS] NOTE: hasCompletedThrow will be set to true. Next continuous G press will switch to next throwable category.");
+            Debug.Log($"[BTS] If user switches weapon before pressing G again, next G will restore last selection.");
+            
+            hasCompletedThrow = true; // Set flag so next continuous G press will switch to next category
+            isThrowingInProgress = false;
+            
+            // Wait a short delay then switch back to weapon (allow throw animation to finish)
+            // This does NOT auto-switch to next throwable - user must press G again
+            StartCoroutine(SwitchBackAfterThrowDelay());
+        }
+        
+        /// <summary>
+        /// Switch back to weapon after throw (with delay to allow throw animation)
+        /// </summary>
+        private System.Collections.IEnumerator SwitchBackAfterThrowDelay()
+        {
+            Debug.Log("[BTS] ⏳ Waiting for throw animation to complete...");
+            Debug.Log($"[BTS] Will switch back to - Slot: {previousEquippedSlot}, Key: {previousEquippedKey}");
+            
+            // Wait a bit longer to ensure throw animation completes (0.3 seconds)
+            yield return new WaitForSeconds(0.3f);
+            
+            Debug.Log("[BTS] ⚡ Now attempting to switch back to weapon...");
+            AutoSwitchBackToWeaponImmediately();
+            
+            // If that failed, try again with longer delay (fallback)
+            yield return new WaitForSeconds(0.5f);
+            
+            var player = FindPlayerCharacter();
+            if (player != null)
+            {
+                var currentItem = GetCurrentHoldItem(player);
+                if (currentItem == null && previousEquippedSlot.HasValue)
+                {
+                    // Still empty hand - try switching again
+                    Debug.Log("[BTS] Still empty hand, retrying switch back...");
+                    AutoSwitchBackToWeaponImmediately();
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Retry auto-switch back if immediate switch failed (with minimal delay)
+        /// </summary>
+        private System.Collections.IEnumerator RetryAutoSwitchBack()
+        {
+            // Wait just a few frames for player state to stabilize
+            yield return null; // Wait 1 frame
+            yield return null; // Wait another frame
+            
+            if (!previousEquippedSlot.HasValue) yield break;
+            
+            try
+            {
+                var player = FindPlayerCharacter();
+                if (player == null) yield break;
+                
+                if (!IsPlayerSafeToSwitch(player)) yield break;
+                
+                int weaponSlot = previousEquippedSlot.Value;
+                if (SwitchToSlot(weaponSlot))
+                {
+                    lastEquippedThrowableSlot = null;
+                    Debug.Log($"[BTS] ✓ Successfully switched back to weapon slot {weaponSlot} (retry)");
+                }
+            }
+            catch { }
+        }
+        
+        /// <summary>
+        /// Auto-switch back to previous weapon after throw completion (detected via item count - backup method)
+        /// </summary>
+        private void AutoSwitchBackToWeaponAfterThrow()
+        {
+            // This is now a backup method for count-based detection
+            // Primary detection is via mouse button release
+            AutoSwitchBackToWeaponImmediately();
         }
 
         /// <summary>
@@ -1146,55 +2416,57 @@ namespace BetterThrowingSystem
         {
             if (item == null) return false;
             
-            // Exclude non-throwable items by TypeID
-            int[] excludedTypeIDs = { 25 }; // Flashlight is not a throwable
+            // Remove (Clone) suffix for better matching
+            var rawName = item.name ?? "";
+            var name = rawName.ToLower().Replace("(clone)", "").Trim();
+            var displayName = rawName.Replace("(Clone)", "").Trim();
+            
+            Debug.Log($"[BTS] IsThrowableItem check: {item.name} (TypeID: {item.TypeID})");
+            
+            // STEP 0: Exclude known non-throwable items by TypeID (highest priority - blacklist)
+            int[] excludedTypeIDs = { 
+                12,  // BeanCan - 豆子罐头（不是投掷物）
+                25   // Flashlight - 手电筒（不是投掷物）
+            };
             if (excludedTypeIDs.Contains(item.TypeID))
             {
+                Debug.Log($"[BTS] Item {item.name} (TypeID: {item.TypeID}) excluded - in blacklist");
                 return false;
             }
             
-            // Method 1: Check by known throwable TypeIDs (from logs: 66, 67, 660, 933, 941, 942, 24)
-            int[] throwableTypeIDs = { 24, 66, 67, 660, 933, 941, 942 }; // DynamiteMultiple, FlashGrenade, Grenade, SmokeGrenade, ToxGrenade, FireGrenade, ElecGrenade
-            if (throwableTypeIDs.Contains(item.TypeID))
-            {
-                return true;
-            }
-            
-            // Method 2: Check by item name keywords (expanded list)
-            var name = item.name?.ToLower() ?? "";
-            var displayName = item.name ?? "";
-            
-            // Exclude flashlight explicitly
-            if (name.Contains("flashlight"))
-            {
-                return false;
-            }
-            
-            // Check for throwable keywords (expanded to include bombs, tubes, dynamite, etc.)
-            string[] throwableKeywords = {
-                "grenade", "手雷",
-                "flash", "闪光",
-                "smoke", "烟雾",
-                "molotov", "燃烧瓶",
-                "tox", "毒气",
-                "elec", "电",
-                "bomb", "炸弹", "管状", "集数", "罐装",
-                "dynamite", "炸药", "集束",
-                "tube", "canister", "can",
-                "throwing", "投掷",
-                "粪球", "feces", "dung",
-                "explosive", "爆炸"
+            // Exclude by name patterns that are definitely not throwables
+            string[] excludedNamePatterns = {
+                "bean", "豆子", "罐头", "can", "candy", "糖果", 
+                "flashlight", "手电",
+                "冲锋枪", "rifle", "gun", "weapon", "枪"
             };
-            
-            foreach (var keyword in throwableKeywords)
+            foreach (var pattern in excludedNamePatterns)
             {
-                if (name.Contains(keyword.ToLower()) || displayName.Contains(keyword))
+                if (name.Contains(pattern.ToLower()) && !IsThrowableException(item, pattern))
                 {
-                    return true;
+                    Debug.Log($"[BTS] Item {item.name} excluded - matches excluded pattern: {pattern}");
+                    return false;
                 }
             }
             
-            // Method 3: Check SkillType property (from log: "skillType is itemSkill")
+            // STEP 1: Check by known throwable TypeIDs (most reliable - whitelist)
+            int[] throwableTypeIDs = { 
+                24,    // DynamiteMultiple
+                66,    // FlashGrenade
+                67,    // Grenade
+                660,   // SmokeGrenade
+                933,   // ToxGrenade
+                941,   // FireGrenade
+                942,   // ElecGrenade
+                1257   // ShitBall (粪球)
+            };
+            if (throwableTypeIDs.Contains(item.TypeID))
+            {
+                Debug.Log($"[BTS] ✅ Item {item.name} (TypeID: {item.TypeID}) identified as throwable - TypeID whitelist");
+                return true;
+            }
+            
+            // STEP 2: Check SkillType property (reliable indicator)
             try
             {
                 var itemType = item.GetType();
@@ -1222,7 +2494,7 @@ namespace BetterThrowingSystem
                 // Ignore reflection errors
             }
             
-            // Method 4: Try to check item properties/methods that indicate throwable capability
+            // STEP 3: Check item properties/methods that indicate throwable capability
             try
             {
                 var itemType = item.GetType();
@@ -1271,6 +2543,74 @@ namespace BetterThrowingSystem
             {
                 // Ignore reflection errors
             }
+            
+            // STEP 4: Check by item name keywords (least reliable - use as fallback only)
+            // Only use precise keywords that won't cause false positives
+            string[] throwableKeywords = {
+                "grenade", "手雷",
+                "flash", "闪光",
+                "smoke", "烟雾",
+                "molotov", "燃烧瓶",
+                "tox", "毒气",
+                "elec", "电",
+                "bomb", "炸弹", "管状", "集数",
+                "dynamite", "炸药", "集束",
+                "tube", "canister",  // Removed "can" to avoid BeanCan false positive
+                "throwing", "投掷",
+                "粪球", "feces", "dung", "shitball", "shit",  // Added "shitball" and "shit" for ShitBall
+                "explosive", "爆炸"
+            };
+            
+            foreach (var keyword in throwableKeywords)
+            {
+                if (name.Contains(keyword.ToLower()) || displayName.Contains(keyword))
+                {
+                    Debug.Log($"[BTS] Item {item.name} identified as throwable via keyword: {keyword}");
+                    return true;
+                }
+            }
+            
+            return false;
+        }
+        
+        /// <summary>
+        /// Check if an item should be exempted from exclusion patterns (e.g., a throwable item that contains "can" in name)
+        /// </summary>
+        private bool IsThrowableException(Item item, string pattern)
+        {
+            // If the item has already passed TypeID or SkillType checks, don't exclude it
+            // This allows items like "canister grenade" to be identified even if they contain "can"
+            
+            // Check if it's in the throwable TypeID whitelist (must match main whitelist)
+            int[] throwableTypeIDs = { 24, 66, 67, 660, 933, 941, 942, 1257 }; // Include 1257 (ShitBall)
+            if (throwableTypeIDs.Contains(item.TypeID))
+            {
+                return true;
+            }
+            
+            // Check SkillType
+            try
+            {
+                var itemType = item.GetType();
+                var skillTypeProp = itemType.GetProperty("SkillType", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (skillTypeProp != null)
+                {
+                    try
+                    {
+                        var skillType = skillTypeProp.GetValue(item);
+                        if (skillType != null)
+                        {
+                            string skillTypeStr = skillType.ToString().ToLower();
+                            if (skillTypeStr.Contains("item") || skillTypeStr.Contains("throw"))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
             
             return false;
         }
@@ -1346,7 +2686,18 @@ namespace BetterThrowingSystem
                             bool isThrowable = IsThrowableItem(item);
                             string throwableMark = isThrowable ? "⭐ THROWABLE" : "";
                             
+                            var itemName = item.name?.ToLower() ?? "";
                             Debug.Log($"[BTS] Slot {slotIndex}: {item.name} | TypeID: {item.TypeID} | Type: {itemType.Name} {throwableMark}");
+                            
+                            // Special debug for items that contain "粪球" or "feces" or "dung" in name
+                            bool isFecesItem = itemName.Contains("粪球") || itemName.Contains("feces") || itemName.Contains("dung");
+                            if (isFecesItem)
+                            {
+                                Debug.Log($"[BTS]   >>> FEces/Dung item detected! <<<");
+                                Debug.Log($"[BTS]   Full name: {item.name}");
+                                Debug.Log($"[BTS]   TypeID: {item.TypeID}");
+                                Debug.Log($"[BTS]   IsThrowable check result: {isThrowable}");
+                            }
                             
                             // Always check for throwable-related properties/methods for debugging
                             try
@@ -1359,7 +2710,8 @@ namespace BetterThrowingSystem
                                 {
                                     var propName = prop.Name.ToLower();
                                     if (propName.Contains("throw") || propName.Contains("bomb") || propName.Contains("explosive") || 
-                                        propName.Contains("dynamite") || propName.Contains("skill") || propName.Contains("cast"))
+                                        propName.Contains("dynamite") || propName.Contains("skill") || propName.Contains("cast") ||
+                                        isFecesItem)  // Always show all properties for feces items
                                     {
                                         try
                                         {
@@ -1386,23 +2738,33 @@ namespace BetterThrowingSystem
                                 }
                                 
                                 // Also check for SkillType or ItemSkill related properties (from log: "skillType is itemSkill")
-                                var skillTypeProp = itemType.GetProperty("SkillType", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                                if (skillTypeProp != null)
+                                var skillTypePropCheck = itemType.GetProperty("SkillType", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                                if (skillTypePropCheck != null)
                                 {
                                     try
                                     {
-                                        var skillType = skillTypeProp.GetValue(item);
-                                        Debug.Log($"[BTS]   -> SkillType: {skillType}");
-                                        if (skillType != null)
+                                        var skillTypeValue = skillTypePropCheck.GetValue(item);
+                                        Debug.Log($"[BTS]   -> SkillType: {skillTypeValue}");
+                                        if (isFecesItem)
                                         {
-                                            string skillTypeStr = skillType.ToString().ToLower();
+                                            Debug.Log($"[BTS]   >>> SkillType for Feces item: {skillTypeValue} <<<");
+                                        }
+                                        if (skillTypeValue != null)
+                                        {
+                                            string skillTypeStr = skillTypeValue.ToString().ToLower();
                                             if (skillTypeStr.Contains("item") || skillTypeStr.Contains("throw"))
                                             {
                                                 Debug.Log($"[BTS]   ⚠️ This item might be throwable based on SkillType!");
                                             }
                                         }
                                     }
-                                    catch { }
+                                    catch (System.Exception e)
+                                    {
+                                        if (isFecesItem)
+                                        {
+                                            Debug.Log($"[BTS]   >>> SkillType check failed: {e.Message} <<<");
+                                        }
+                                    }
                                 }
                             }
                             catch { }
@@ -1568,8 +2930,15 @@ namespace BetterThrowingSystem
                 }
             }
             
-            Debug.LogWarning("[BTS] Could not find player character! Using first CharacterMainControl found.");
-            return allChars.Length > 0 ? allChars[0] : null;
+            // Fallback: Use first CharacterMainControl found (even if we can't verify it's the player)
+            // This allows the mod to work even if player detection fails
+            if (allChars.Length > 0)
+            {
+                Debug.LogWarning($"[BTS] Could not verify player character! Using first CharacterMainControl found: {allChars[0].gameObject.name}");
+                return allChars[0];
+            }
+            
+            return null;
         }
         
         /// <summary>
