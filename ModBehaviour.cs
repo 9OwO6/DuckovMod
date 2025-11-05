@@ -131,7 +131,7 @@ namespace BetterThrowingSystem
         private void Start()
         {
             Debug.Log("[BTS] =========================================");
-            Debug.Log("[BTS] Mod loaded (Start called) - VERSION 2.1.8 (Enhanced Item Filtering)");
+            Debug.Log("[BTS] Mod loaded (Start called) - VERSION 2.1.9 (ModSetting Integration + Normal View Mode)");
             Debug.Log($"[BTS] Performance Mode: {(PERFORMANCE_MODE ? "ENABLED (Max Performance)" : "DISABLED (Full Features)")}");
             Debug.Log($"[BTS] Radial Menu: {(DISABLE_RADIAL_MENU ? "DISABLED" : "ENABLED")}");
             Debug.Log("[BTS] =========================================");
