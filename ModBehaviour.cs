@@ -1,12 +1,15 @@
 using UnityEngine;
+using UnityEngine.UI;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Diagnostics;
 using ItemStatsSystem;
 using Duckov.Modding;
 using Duckov.UI.DialogueBubbles;
 using Cysharp.Threading.Tasks;
 using System.Threading;
+using Debug = UnityEngine.Debug; // Alias to resolve conflict with System.Diagnostics.Debug
 
 namespace BetterThrowingSystem
 {
@@ -43,11 +46,29 @@ namespace BetterThrowingSystem
         private bool lastActionWasGKey = false;             // Whether last action was pressing G key (for detecting continuous G presses)
         private bool lastActionWasWeaponSwitch = false;     // Whether last action was switching weapon (1/2/V key)
         
-        // Long-press G selection mode
-        private bool isInSelectionMode = false;             // Whether we're in long-press selection mode
+        // Long-press G selection mode (old scroll wheel mode)
+        private bool isInSelectionMode = false;             // Whether we're in long-press selection mode (scroll wheel)
         private int selectionModeCurrentIndex = 0;          // Current selected throwable index in selection mode
         private float gKeyHoldTime = 0f;                    // Time G key has been held
         private const float G_KEY_LONG_PRESS_TIME = 0.3f;   // Time to hold G to enter selection mode (seconds)
+        
+        // Radial menu (wheel menu) system
+        private bool useRadialMenu = true;                  // Enable radial menu instead of scroll wheel mode
+        private bool isRadialMenuOpen = false;              // Whether radial menu is currently open
+        
+        // Performance mode settings (for users with low-end hardware)
+        // Set to true for maximum performance (disables some features)
+        private const bool PERFORMANCE_MODE = true;         // PERFORMANCE MODE: true = max performance, false = full features
+        private const bool DISABLE_RADIAL_MENU = false;    // If true, completely disable radial menu (use old scroll mode)
+        private const float PERFORMANCE_MONITOR_INTERVAL = 0.5f; // Monitor update interval in performance mode (0.5s)
+        private const float PERFORMANCE_ITEM_CHECK_INTERVAL = 0.3f; // Item check interval in performance mode (0.3s)
+        private GameObject? radialMenuCanvas = null;        // Canvas for radial menu UI
+        private RectTransform? radialMenuContainer = null;  // Container for radial menu items
+        private List<GameObject> radialMenuItems = new List<GameObject>(); // UI items in radial menu
+        private int radialMenuSelectedIndex = -1;           // Currently selected item index (-1 = none)
+        private const float RADIAL_MENU_RADIUS = 250f;     // Radius of radial menu in pixels (increased for better selection)
+        private const float RADIAL_MENU_ITEM_SIZE = 80f;   // Size of each item icon in pixels
+        private const float RADIAL_MENU_SELECTION_TOLERANCE = 150f; // Tolerance for selection (pixels from center)
         
         // For detecting throw completion (monitor item count change)
         private Dictionary<int, int> lastItemCounts = new Dictionary<int, int>(); // slot -> count
@@ -58,12 +79,82 @@ namespace BetterThrowingSystem
         private float throwStartTime = 0f; // Time when throw was detected to have started
         private const float MAX_THROW_DURATION = 2f; // Maximum throw duration (seconds) - fallback timeout
         private bool wasMouseButton0Down = false; // Track mouse left button state for throw detection
+        
+        // Performance optimization: Cache player and reflection methods
+        private CharacterMainControl? cachedPlayer = null; // Cached player object
+        private float lastPlayerCacheTime = 0f; // Last time player was cached
+        private const float PLAYER_CACHE_REFRESH_INTERVAL = 2f; // Refresh player cache every 2 seconds (AGGRESSIVE OPTIMIZATION)
+        private System.Reflection.MethodInfo? cachedGetItemMethod = null; // Cached GetItem method
+        private Inventory? cachedInventory = null; // Cached inventory component
+        private System.Reflection.MethodInfo? cachedGetCurrentHoldItemMethod = null; // Cached GetCurrentHoldItem method
+        private float lastMonitorUpdateTime = 0f; // Last time MonitorThrowableItems was called
+        private float GetMonitorUpdateInterval() => PERFORMANCE_MODE ? PERFORMANCE_MONITOR_INTERVAL : 0.3f; // Dynamic interval based on performance mode
+        private float lastItemCheckTime = 0f; // Last time current item was checked
+        private float GetItemCheckInterval() => PERFORMANCE_MODE ? PERFORMANCE_ITEM_CHECK_INTERVAL : 0.15f; // Dynamic interval based on performance mode
+        private const bool ENABLE_MOUSE_TRACKING = false; // DISABLED: Mouse tracking causes severe FPS drops
+        
+        // PERFORMANCE: Cache IsThrowableItem results by TypeID to avoid repeated checks
+        private Dictionary<int, bool> throwableItemCache = new Dictionary<int, bool>();
+        private const bool ENABLE_IS_THROWABLE_DEBUG_LOGS = false; // Disable debug logs in IsThrowableItem for performance
+        
+        // PERFORMANCE: Cache last inventory scan result to avoid rescanning on every G press
+        private float lastInventoryScanTime = 0f;
+        private const float INVENTORY_SCAN_CACHE_DURATION = 0.5f; // Cache inventory scan for 0.5 seconds
+        private bool inventoryScanCacheValid = false;
+        
+        // PERFORMANCE: Cache maxSlots to avoid repeated reflection calls
+        private int? cachedMaxSlots = null;
+        private System.Type? cachedInventoryType = null;
+        
+        // Performance profiling
+        private const bool ENABLE_PERFORMANCE_PROFILING = true; // Enable detailed performance logging
+        private const float PERFORMANCE_LOG_THRESHOLD_MS = 5f; // Log frames that take longer than this (ms)
+        private Stopwatch frameStopwatch = new Stopwatch();
+        private Dictionary<string, float> methodTimings = new Dictionary<string, float>();
+        private int frameCount = 0;
+        private const int PERFORMANCE_LOG_INTERVAL = 60; // Log performance summary every N frames
+        private float lastPerformanceLogTime = 0f;
+        private const float PERFORMANCE_LOG_SUMMARY_INTERVAL = 5f; // Log summary every 5 seconds
+        
+        // ModConfig Settings
+        public enum ThrowMode { Equip, Throw } // "按G装备" or "按G投掷"
+        public enum ViewMode { Normal, FirstPerson, ThirdPerson } // "正常视角", "第一人称", or "第三人称"
+        
+        // Configuration values (will be loaded from ModConfig later)
+        private bool throwSoundEnabled = true; // 投掷音效开关
+        private ThrowMode throwMode = ThrowMode.Equip; // 按G投掷/按G装备切换
+        private bool otherViewSupportEnabled = false; // 其他视角支持开关
+        private ViewMode selectedViewMode = ViewMode.Normal; // 正常视角/第一人称/第三人称支持
+        
+        // ModConfig integration - settings will appear in game's Mod Settings tab
 
         private void Start()
         {
             Debug.Log("[BTS] =========================================");
-            Debug.Log("[BTS] Mod loaded (Start called) - VERSION 2.0");
+            Debug.Log("[BTS] Mod loaded (Start called) - VERSION 2.1.8 (Enhanced Item Filtering)");
+            Debug.Log($"[BTS] Performance Mode: {(PERFORMANCE_MODE ? "ENABLED (Max Performance)" : "DISABLED (Full Features)")}");
+            Debug.Log($"[BTS] Radial Menu: {(DISABLE_RADIAL_MENU ? "DISABLED" : "ENABLED")}");
             Debug.Log("[BTS] =========================================");
+            
+            // Initialize cached player early for better performance
+            cachedPlayer = FindPlayerCharacter();
+            if (cachedPlayer != null)
+            {
+                lastPlayerCacheTime = Time.time;
+                cachedInventory = cachedPlayer.GetComponent<Inventory>() ?? cachedPlayer.GetComponentInChildren<Inventory>();
+                if (cachedInventory != null)
+                {
+                    var inventoryType = cachedInventory.GetType();
+                    cachedGetItemMethod = inventoryType.GetMethod(
+                        "GetItem",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    ) ?? inventoryType.GetMethod(
+                        "GetItemAt",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    );
+                }
+                Debug.Log("[BTS] Player cached for performance optimization");
+            }
             
             // Try to find player transform for dialogue bubbles
             playerTransform = FindPlayerTransform();
@@ -82,10 +173,277 @@ namespace BetterThrowingSystem
             // Scan and print all registered items in ItemAssetsCollection
             // This helps find the correct TypeID for throwables
             ScanAllRegisteredItems();
+            
+        }
+        
+        void OnEnable()
+        {
+            // Subscribe to ModManager events to detect when ModSetting is activated
+            try
+            {
+                Duckov.Modding.ModManager.OnModActivated += OnModActivated;
+                Duckov.Modding.ModManager.OnModWillBeDeactivated += OnModWillBeDeactivated;
+                Debug.Log("[BTS] Subscribed to ModManager events");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[BTS] Failed to subscribe to ModManager events: {ex.Message}");
+            }
+            
+            // Check ModSettingAPI availability (similar to RadialMenu's OnEnable)
+            // RadialMenu checks: if (ModSettingAPI.IsInit) { RadialMenuModConfig.SetupModConfig(info, MOD_NAME); }
+            Debug.Log($"[BTS] OnEnable: Checking ModSettingAPI - IsInit: {ModSettingAPI.IsInit}, info.name='{info.name}', info.displayName='{info.displayName}'");
+            
+            if (ModSettingAPI.IsInit)
+            {
+                Debug.Log("[BTS] OnEnable: ModSettingAPI is already initialized, attempting to register");
+                TryInitializeModSetting();
+            }
+            else
+            {
+                Debug.Log("[BTS] OnEnable: ModSettingAPI not initialized yet, will wait for OnModActivated or OnAfterSetup");
+            }
+        }
+        
+        void OnDisable()
+        {
+            // Unsubscribe from ModManager events
+            try
+            {
+                Duckov.Modding.ModManager.OnModActivated -= OnModActivated;
+                Duckov.Modding.ModManager.OnModWillBeDeactivated -= OnModWillBeDeactivated;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[BTS] Failed to unsubscribe from ModManager events: {ex.Message}");
+            }
+            
+            // Teardown ModSetting
+            TeardownModSetting();
+        }
+        
+        /// <summary>
+        /// Called when another mod (e.g., ModSetting) is activated
+        /// Similar to RadialMenu's OnModActivated method
+        /// </summary>
+        private void OnModActivated(Duckov.Modding.ModInfo modInfo, Duckov.Modding.ModBehaviour behaviour)
+        {
+            try
+            {
+                if (modInfo.Equals(default(Duckov.Modding.ModInfo)) || string.IsNullOrEmpty(modInfo.name))
+                    return;
+
+                Debug.Log($"[BTS] OnModActivated: Mod '{modInfo.name}' activated");
+                
+                // Check if ModSetting mod is activated
+                if (modInfo.name == ModSettingAPI.MOD_NAME)
+                {
+                    Debug.Log("[BTS] Detected ModSetting mod activation, attempting to register settings");
+                    // Wait a bit for our own info to be set (if it's not ready yet)
+                    StartCoroutine(DelayedModSettingInit());
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[BTS] OnModActivated handler error: {ex.Message}");
+                Debug.LogWarning($"[BTS] Stack trace: {ex.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// Delayed initialization after ModSetting mod is activated
+        /// Waits for this.info to be set properly
+        /// </summary>
+        private System.Collections.IEnumerator DelayedModSettingInit()
+        {
+            // Wait a bit for our mod's info to be set
+            yield return new WaitForSeconds(0.2f);
+            
+            // Try multiple times until info is set
+            for (int i = 0; i < 10; i++)
+            {
+                if (!string.IsNullOrEmpty(info.name))
+                {
+                    Debug.Log($"[BTS] DelayedModSettingInit: ModInfo is now valid (name='{info.name}', displayName='{info.displayName}')");
+                    TryInitializeModSetting();
+                    yield break;
+                }
+                
+                if (i == 0)
+                {
+                    Debug.Log($"[BTS] DelayedModSettingInit: Waiting for ModInfo to be set (current: name='{info.name}', displayName='{info.displayName}')...");
+                }
+                
+                yield return new WaitForSeconds(0.2f);
+            }
+            
+            Debug.LogWarning("[BTS] DelayedModSettingInit: ModInfo.name was never set, cannot initialize ModSetting");
+        }
+        
+        /// <summary>
+        /// Called when a mod is about to be deactivated
+        /// Similar to RadialMenu's OnModWillBeDeactivated
+        /// </summary>
+        private void OnModWillBeDeactivated(Duckov.Modding.ModInfo modInfo, Duckov.Modding.ModBehaviour behaviour)
+        {
+            if (modInfo.name != ModSettingAPI.MOD_NAME)
+                return;
+            
+            // Only teardown if ModSetting is actually initialized
+            // This prevents teardown when ModSetting hasn't been set up yet
+            if (!ModSettingAPI.IsInit)
+            {
+                Debug.Log("[BTS] ModSetting is being deactivated but it's not initialized, skipping teardown");
+                return;
+            }
+            
+            Debug.Log("[BTS] ModSetting mod is being deactivated, removing our settings");
+            // When ModSetting is disabled, remove our settings
+            TeardownModSetting();
+        }
+        
+        /// <summary>
+        /// Called after Setup (if ModSetting was enabled before this mod)
+        /// Similar to RadialMenu's OnAfterSetup method
+        /// RadialMenu uses: if (ModSettingAPI.Init(info)) { RadialMenuModConfig.SetupModConfig(info, MOD_NAME); }
+        /// </summary>
+        protected override void OnAfterSetup()
+        {
+            base.OnAfterSetup();
+            Debug.Log($"[BTS] OnAfterSetup called - info.name='{info.name}', info.displayName='{info.displayName}'");
+            
+            // Check if info is valid (at this point, info should be set by the game)
+            if (string.IsNullOrEmpty(info.name))
+            {
+                Debug.LogWarning("[BTS] OnAfterSetup: ModInfo.name is still empty, ModSetting initialization will be deferred");
+                // Start a coroutine to retry later
+                StartCoroutine(RetryModSettingInit());
+                return;
+            }
+            
+            Debug.Log("[BTS] OnAfterSetup: ModInfo is valid, attempting to initialize ModSetting");
+            
+            // Check if ModSettingAPI is available (similar to RadialMenu)
+            // RadialMenu does: if (ModSettingAPI.Init(info)) { RadialMenuModConfig.SetupModConfig(info, MOD_NAME); }
+            if (ModSettingAPI.Init(info))
+            {
+                Debug.Log("[BTS] OnAfterSetup: ModSettingAPI.Init(info) succeeded, setting up ModSetting");
+                SetupModSetting();
+                LoadModSettingValues();
+                _modSettingSetup = true;
+                Debug.Log("[BTS] OnAfterSetup: ModSetting setup completed successfully!");
+            }
+            else
+            {
+                Debug.Log("[BTS] OnAfterSetup: ModSettingAPI.Init(info) failed, ModSetting not available yet");
+            }
+        }
+        
+        /// <summary>
+        /// Retry ModSetting initialization if info was not ready initially
+        /// </summary>
+        private System.Collections.IEnumerator RetryModSettingInit()
+        {
+            // Wait a bit for info to be set
+            yield return new WaitForSeconds(0.5f);
+            
+            for (int i = 0; i < 5; i++)
+            {
+                if (!string.IsNullOrEmpty(info.name))
+                {
+                    Debug.Log($"[BTS] RetryModSettingInit: ModInfo is now valid (name='{info.name}'), attempting initialization");
+                    if (ModSettingAPI.Init(info))
+                    {
+                        SetupModSetting();
+                        LoadModSettingValues();
+                        _modSettingSetup = true;
+                        Debug.Log("[BTS] RetryModSettingInit: ModSetting setup completed successfully!");
+                        yield break;
+                    }
+                }
+                yield return new WaitForSeconds(0.3f);
+            }
+            
+            Debug.LogWarning("[BTS] RetryModSettingInit: Failed to initialize ModSetting after retries");
+        }
+        
+        /// <summary>
+        /// Called before deactivation
+        /// Similar to RadialMenu's OnBeforeDeactivate method
+        /// </summary>
+        protected override void OnBeforeDeactivate()
+        {
+            base.OnBeforeDeactivate();
+            TeardownModSetting();
+        }
+        
+        /// <summary>
+        /// Load settings from ModConfig using OptionsManager_Mod.Load<T>
+        /// According to documentation: Configuration values are read through OptionsManager_Mod.Load<T>(string key, T defaultV)
+        /// </summary>
+        private void LoadModConfigSettings()
+        {
+            try
+            {
+                // Find OptionsManager_Mod type
+                System.Type? optionsManagerType = null;
+                foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        optionsManagerType = assembly.GetType("OptionsManager_Mod");
+                        if (optionsManagerType != null)
+                        {
+                            Debug.Log($"[BTS] Found OptionsManager_Mod in assembly: {assembly.GetName().Name}");
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+                
+                if (optionsManagerType == null)
+                {
+                    Debug.LogWarning("[BTS] OptionsManager_Mod not found, using default settings");
+                    return;
+                }
+                
+                // Get Load<T> method
+                var loadMethod = optionsManagerType.GetMethod("Load", 
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                
+                if (loadMethod == null)
+                {
+                    Debug.LogWarning("[BTS] OptionsManager_Mod.Load method not found");
+                    return;
+                }
+                
+                // Load settings using generic method
+                var loadGeneric = loadMethod.MakeGenericMethod(typeof(bool));
+                var throwSoundValue = loadGeneric.Invoke(null, new object[] { "BetterThrowingSystem.ThrowSoundEnabled", throwSoundEnabled });
+                if (throwSoundValue != null)
+                {
+                    throwSoundEnabled = (bool)throwSoundValue;
+                    Debug.Log($"[BTS] Loaded ThrowSoundEnabled from ModConfig: {throwSoundEnabled}");
+                }
+                
+                // Note: Enum and other types would need similar handling
+                // For now, we'll just load the basic settings
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[BTS] Failed to load settings from ModConfig: {ex.Message}");
+            }
         }
 
         private void Update()
         {
+            // PERFORMANCE PROFILING: Start frame timing
+            frameStopwatch.Restart();
+            float frameStartTime = Time.realtimeSinceStartup;
+            
+            // Track method timings
+            Stopwatch methodStopwatch = new Stopwatch();
+            
             // ① First verify input is working - dump all items
             if (Input.GetKeyDown(debugKey))
             {
@@ -113,59 +471,128 @@ namespace BetterThrowingSystem
                 Debug.Log("[BTS] F11 pressed - Scanning all inventory items with details...");
                 ScanAllInventoryItemsWithDetails();
             }
+            
 
             // ② G key: Handle both quick press and long-press selection mode
+            Stopwatch gKeyStopwatch = new Stopwatch();
+            gKeyStopwatch.Restart();
+            
             if (Input.GetKey(throwKey))
             {
                 // G key is held down
                 gKeyHoldTime += Time.deltaTime;
                 
                 // Check if we should enter selection mode
-                if (!isInSelectionMode && gKeyHoldTime >= G_KEY_LONG_PRESS_TIME)
+                if (gKeyHoldTime >= G_KEY_LONG_PRESS_TIME)
                 {
-                    // Enter selection mode
-                    isInSelectionMode = true;
-                    Debug.Log("[BTS] =========================================");
-                    Debug.Log("[BTS] ========== ENTERING SELECTION MODE ==========");
-                    Debug.Log("[BTS] =========================================");
-                    
-                    // Initialize selection index (start with first throwable category)
-                    var throwablesList = GetAllThrowablesByCategory();
-                    if (throwablesList.Count > 0)
+                    // PERFORMANCE: Check if radial menu is disabled
+                    if (useRadialMenu && !DISABLE_RADIAL_MENU)
                     {
-                        selectionModeCurrentIndex = 0;
-                        ShowSelectionModeBubble(throwablesList[selectionModeCurrentIndex]);
+                        // Use radial menu system
+                        if (!isRadialMenuOpen)
+                        {
+                            Stopwatch openMenuStopwatch = new Stopwatch();
+                            openMenuStopwatch.Restart();
+                            OpenRadialMenu();
+                            openMenuStopwatch.Stop();
+                            if (ENABLE_PERFORMANCE_PROFILING && openMenuStopwatch.ElapsedMilliseconds > 1)
+                            {
+                                RecordMethodTiming("OpenRadialMenu", openMenuStopwatch.ElapsedMilliseconds);
+                                UnityEngine.Debug.Log($"[BTS] OpenRadialMenu took {openMenuStopwatch.ElapsedMilliseconds}ms");
+                            }
+                        }
+                        else
+                        {
+                            // Handle mouse scroll wheel for changing selection (no rotation, just highlight)
+                            // PERFORMANCE: Mouse tracking disabled - only use scroll wheel
+                            // PERFORMANCE: Only check scroll input when menu is open
+                            if (Mathf.Abs(Input.GetAxis("Mouse ScrollWheel")) > 0.001f)
+                            {
+                                Stopwatch scrollStopwatch = new Stopwatch();
+                                scrollStopwatch.Restart();
+                                HandleRadialMenuScroll();
+                                scrollStopwatch.Stop();
+                                if (ENABLE_PERFORMANCE_PROFILING && scrollStopwatch.ElapsedMilliseconds > 1)
+                                {
+                                    RecordMethodTiming("HandleRadialMenuScroll", scrollStopwatch.ElapsedMilliseconds);
+                                }
+                            }
+                            
+                            // DISABLED: Mouse tracking causes severe FPS drops (100+ FPS loss reported)
+                            // Users can use scroll wheel to select items instead
+                            // if (ENABLE_MOUSE_TRACKING)
+                            // {
+                            //     UpdateRadialMenuSelection();
+                            // }
+                        }
                     }
                     else
                     {
-                        ShowDebugBubble(isChinese ? "❌ 背包中没有投掷物" : "❌ No throwables in inventory");
-                        isInSelectionMode = false;
-                        gKeyHoldTime = 0f;
+                        // Use old scroll wheel mode
+                        if (!isInSelectionMode)
+                        {
+                            // Enter selection mode
+                            isInSelectionMode = true;
+                            Debug.Log("[BTS] =========================================");
+                            Debug.Log("[BTS] ========== ENTERING SELECTION MODE ==========");
+                            Debug.Log("[BTS] =========================================");
+                            
+                            // Initialize selection index (start with first throwable category)
+                            var throwablesList = GetAllThrowablesByCategory();
+                            if (throwablesList.Count > 0)
+                            {
+                                selectionModeCurrentIndex = 0;
+                                ShowSelectionModeBubble(throwablesList[selectionModeCurrentIndex]);
+                            }
+                            else
+                            {
+                                ShowDebugBubble(isChinese ? "❌ 背包中没有投掷物" : "❌ No throwables in inventory");
+                                isInSelectionMode = false;
+                                gKeyHoldTime = 0f;
+                            }
+                        }
+                        
+                        // If in selection mode, handle mouse scroll wheel
+                        if (isInSelectionMode)
+                        {
+                            HandleSelectionModeScroll();
+                        }
                     }
-                }
-                
-                // If in selection mode, handle mouse scroll wheel
-                if (isInSelectionMode)
-                {
-                    HandleSelectionModeScroll();
                 }
             }
             else if (Input.GetKeyUp(throwKey))
             {
                 // G key was released
-                if (isInSelectionMode)
+                if (useRadialMenu && isRadialMenuOpen)
                 {
-                    // Exit selection mode and equip selected item
+                    // Close radial menu and equip selected item
+                    CloseRadialMenuAndEquip();
+                }
+                else if (isInSelectionMode)
+                {
+                    // Exit selection mode and equip selected item (scroll wheel mode)
                     ExitSelectionModeAndEquip();
                 }
                 else if (gKeyHoldTime < G_KEY_LONG_PRESS_TIME && gKeyHoldTime > 0f)
                 {
                     // Quick press - use normal cycle logic
+                    Stopwatch quickGStopwatch = new Stopwatch();
+                    quickGStopwatch.Restart();
+                    
                     Debug.Log("[BTS] =========================================");
                     Debug.Log("[BTS] ========== G KEY PRESSED (QUICK) ==========");
                     Debug.Log("[BTS] =========================================");
                     
+                    Stopwatch findPlayerStopwatch = new Stopwatch();
+                    findPlayerStopwatch.Restart();
                     var playerForGKey = FindPlayerCharacter();
+                    findPlayerStopwatch.Stop();
+                    if (ENABLE_PERFORMANCE_PROFILING && findPlayerStopwatch.ElapsedMilliseconds > 1)
+                    {
+                        RecordMethodTiming("FindPlayerCharacter", findPlayerStopwatch.ElapsedMilliseconds);
+                        UnityEngine.Debug.Log($"[BTS] ⚠️ FindPlayerCharacter took {findPlayerStopwatch.ElapsedMilliseconds}ms");
+                    }
+                    
                     if (playerForGKey == null)
                     {
                         Debug.LogError("[BTS] ❌ CRITICAL: Player not found! Cannot proceed.");
@@ -178,9 +605,30 @@ namespace BetterThrowingSystem
                     
                     // IMPORTANT: Save current weapon BEFORE switching to throwable
                     // This must happen BEFORE CycleToNextThrowable, which might change the current item
+                    Stopwatch saveSlotStopwatch = new Stopwatch();
+                    saveSlotStopwatch.Restart();
                     SaveCurrentEquippedSlot(playerForGKey);
+                    saveSlotStopwatch.Stop();
+                    if (ENABLE_PERFORMANCE_PROFILING && saveSlotStopwatch.ElapsedMilliseconds > 1)
+                    {
+                        RecordMethodTiming("SaveCurrentEquippedSlot", saveSlotStopwatch.ElapsedMilliseconds);
+                    }
                     
+                    Stopwatch cycleStopwatch = new Stopwatch();
+                    cycleStopwatch.Restart();
                     CycleToNextThrowable();
+                    cycleStopwatch.Stop();
+                    if (ENABLE_PERFORMANCE_PROFILING && cycleStopwatch.ElapsedMilliseconds > 1)
+                    {
+                        RecordMethodTiming("CycleToNextThrowable", cycleStopwatch.ElapsedMilliseconds);
+                        UnityEngine.Debug.Log($"[BTS] ⚠️ CycleToNextThrowable took {cycleStopwatch.ElapsedMilliseconds}ms");
+                    }
+                    
+                    quickGStopwatch.Stop();
+                    if (ENABLE_PERFORMANCE_PROFILING && quickGStopwatch.ElapsedMilliseconds > 5)
+                    {
+                        UnityEngine.Debug.Log($"[BTS] ⚠️ Quick G press total took {quickGStopwatch.ElapsedMilliseconds}ms");
+                    }
                     
                     // Mark that last action was G key (for detecting continuous G presses)
                     lastActionWasGKey = true;
@@ -214,11 +662,62 @@ namespace BetterThrowingSystem
                 }
             }
             
-            // Monitor throw completion through multiple methods:
-            // 1. Item count change (primary - most reliable) - handled in MonitorThrowableItems
-            // 2. Empty hand state after holding throwable (secondary)
-            // 3. Timeout fallback (if throw takes too long)
-            var player = FindPlayerCharacter();
+            // PERFORMANCE: Aggressively reduce player lookup frequency
+            float currentTime = Time.time;
+            // CRITICAL PERFORMANCE FIX: Only refresh player cache if it's null or very old
+            // This prevents FindObjectsOfType from being called every frame (causing 100+ FPS drops)
+            bool shouldRefreshPlayer = cachedPlayer == null || 
+                                      cachedPlayer.gameObject == null || 
+                                      !cachedPlayer.gameObject.activeInHierarchy || 
+                                      (currentTime - lastPlayerCacheTime > PLAYER_CACHE_REFRESH_INTERVAL);
+            
+            if (shouldRefreshPlayer)
+            {
+                Stopwatch refreshPlayerStopwatch = new Stopwatch();
+                refreshPlayerStopwatch.Restart();
+                cachedPlayer = FindPlayerCharacter();
+                refreshPlayerStopwatch.Stop();
+                if (ENABLE_PERFORMANCE_PROFILING && refreshPlayerStopwatch.ElapsedMilliseconds > 1)
+                {
+                    RecordMethodTiming("RefreshPlayerCache", refreshPlayerStopwatch.ElapsedMilliseconds);
+                    if (refreshPlayerStopwatch.ElapsedMilliseconds > 5)
+                    {
+                        UnityEngine.Debug.Log($"[BTS] ⚠️ RefreshPlayerCache took {refreshPlayerStopwatch.ElapsedMilliseconds}ms");
+                    }
+                }
+                lastPlayerCacheTime = currentTime;
+                
+                // Cache inventory and GetItem method when player is found
+                if (cachedPlayer != null)
+                {
+                    cachedInventory = cachedPlayer.GetComponent<Inventory>() ?? cachedPlayer.GetComponentInChildren<Inventory>();
+                    if (cachedInventory != null)
+                    {
+                        var inventoryType = cachedInventory.GetType();
+                        cachedGetItemMethod = inventoryType.GetMethod(
+                            "GetItem",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                        ) ?? inventoryType.GetMethod(
+                            "GetItemAt",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                        );
+                    }
+                    
+                    // Cache GetCurrentHoldItem method
+                    var playerType = cachedPlayer.GetType();
+                    var currentHoldItemAgentProp = playerType.GetProperty("CurrentHoldItemAgent",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (currentHoldItemAgentProp != null)
+                    {
+                        var agentType = currentHoldItemAgentProp.PropertyType;
+                        var itemProp = agentType.GetProperty("Item",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                        // Note: We'll use the property directly in GetCurrentHoldItemCached
+                    }
+                }
+            }
+            
+            var player = cachedPlayer;
             
             // Only monitor if we have a valid player and are tracking a throwable
             if (player == null)
@@ -231,9 +730,45 @@ namespace BetterThrowingSystem
             
             if (lastEquippedThrowableSlot.HasValue)
             {
-                var currentItem = GetCurrentHoldItem(player);
-                bool isHoldingThrowable = currentItem != null && IsThrowableItem(currentItem);
-                bool isEmptyHand = currentItem == null;
+                // PERFORMANCE: Aggressively reduce reflection calls
+                // Use dynamic interval based on performance mode
+                Item? currentItem = null;
+                float itemCheckInterval = GetItemCheckInterval(); // Dynamic based on performance mode
+                bool justChecked = false;
+                if (currentTime - lastItemCheckTime >= itemCheckInterval)
+                {
+                    Stopwatch getItemStopwatch = new Stopwatch();
+                    getItemStopwatch.Restart();
+                    currentItem = GetCurrentHoldItem(player);
+                    getItemStopwatch.Stop();
+                    if (ENABLE_PERFORMANCE_PROFILING && getItemStopwatch.ElapsedMilliseconds > 1)
+                    {
+                        RecordMethodTiming("GetCurrentHoldItem", getItemStopwatch.ElapsedMilliseconds);
+                        if (getItemStopwatch.ElapsedMilliseconds > 3)
+                        {
+                            UnityEngine.Debug.Log($"[BTS] ⚠️ GetCurrentHoldItem took {getItemStopwatch.ElapsedMilliseconds}ms");
+                        }
+                    }
+                    lastItemCheckTime = currentTime;
+                    justChecked = true;
+                }
+                
+                // Determine state based on currentItem or cached state
+                bool isHoldingThrowable;
+                bool isEmptyHand;
+                if (justChecked)
+                {
+                    // We just checked - use actual result
+                    isHoldingThrowable = currentItem != null && IsThrowableItem(currentItem);
+                    isEmptyHand = currentItem == null;
+                }
+                else
+                {
+                    // Use cached state if we skipped the check
+                    // This is safe because we check frequently enough (6.7 times per second)
+                    isHoldingThrowable = wasHoldingThrowable;
+                    isEmptyHand = !wasHoldingThrowable;
+                }
                 
                 // Track when we start holding throwable
                 if (isHoldingThrowable && !wasHoldingThrowable)
@@ -242,7 +777,8 @@ namespace BetterThrowingSystem
                     Debug.Log($"[BTS] Previous weapon info - Slot: {previousEquippedSlot}, Key: {previousEquippedKey}");
                 }
                 
-                // Mouse left button release detection (for throw completion)
+                // PERFORMANCE: Only check mouse buttons when we're actually tracking throwable
+                // Check every frame is acceptable here since we're already in tracking mode
                 bool isMouseButton0Down = Input.GetMouseButton(0); // Left mouse button
                 bool isMouseButton1Down = Input.GetMouseButton(1); // Right mouse button
                 
@@ -277,12 +813,83 @@ namespace BetterThrowingSystem
                 // Not tracking throwable anymore - reset tracking states
                 wasHoldingThrowable = false;
                 isThrowingInProgress = false;
-                // Reset mouse button tracking when not holding throwable
-                wasMouseButton0Down = Input.GetMouseButton(0);
+                // PERFORMANCE: Only check mouse button state periodically, not every frame
+                if (currentTime - lastItemCheckTime >= 0.1f) // Check every 0.1s instead of every frame
+                {
+                    wasMouseButton0Down = Input.GetMouseButton(0);
+                }
             }
             
             // Monitor throwable items to detect throw completion (backup detection via item count)
-            MonitorThrowableItems();
+            // Only update periodically to reduce performance impact
+            if (currentTime - lastMonitorUpdateTime >= GetMonitorUpdateInterval())
+            {
+                methodStopwatch.Restart();
+                MonitorThrowableItems();
+                methodStopwatch.Stop();
+                if (ENABLE_PERFORMANCE_PROFILING && methodStopwatch.ElapsedMilliseconds > 1)
+                {
+                    RecordMethodTiming("MonitorThrowableItems", methodStopwatch.ElapsedMilliseconds);
+                }
+                lastMonitorUpdateTime = currentTime;
+            }
+            
+            // PERFORMANCE PROFILING: End frame timing
+            frameStopwatch.Stop();
+            float frameEndTime = Time.realtimeSinceStartup;
+            float frameTimeMs = (frameEndTime - frameStartTime) * 1000f;
+            frameCount++;
+            
+            // Log heavy frames
+            if (ENABLE_PERFORMANCE_PROFILING)
+            {
+                if (frameTimeMs > PERFORMANCE_LOG_THRESHOLD_MS)
+                {
+                    UnityEngine.Debug.Log($"[BTS] ⚠️ Heavy frame detected: {frameTimeMs:F2}ms (Frame #{frameCount})");
+                }
+                
+                // Log performance summary periodically
+                if (currentTime - lastPerformanceLogTime >= PERFORMANCE_LOG_SUMMARY_INTERVAL)
+                {
+                    LogPerformanceSummary();
+                    lastPerformanceLogTime = currentTime;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Record method execution time for performance analysis
+        /// </summary>
+        private void RecordMethodTiming(string methodName, long milliseconds)
+        {
+            if (!methodTimings.ContainsKey(methodName))
+            {
+                methodTimings[methodName] = 0f;
+            }
+            methodTimings[methodName] += milliseconds;
+        }
+        
+        /// <summary>
+        /// Log performance summary to help identify bottlenecks
+        /// </summary>
+        private void LogPerformanceSummary()
+        {
+            if (methodTimings.Count == 0) return;
+            
+            UnityEngine.Debug.Log($"[BTS] ========== Performance Summary (Last {PERFORMANCE_LOG_SUMMARY_INTERVAL}s, {frameCount} frames) ==========");
+            
+            var sortedMethods = methodTimings.OrderByDescending(kvp => kvp.Value).Take(10);
+            foreach (var kvp in sortedMethods)
+            {
+                float avgTime = kvp.Value / frameCount;
+                UnityEngine.Debug.Log($"[BTS] {kvp.Key}: {kvp.Value:F2}ms total, {avgTime:F3}ms avg per frame");
+            }
+            
+            UnityEngine.Debug.Log($"[BTS] =============================================================");
+            
+            // Reset for next period
+            methodTimings.Clear();
+            frameCount = 0;
         }
         
 
@@ -302,9 +909,18 @@ namespace BetterThrowingSystem
 
         /// <summary>
         /// Scan player inventory slots (ALL slots) for throwable items and group by TypeID (category)
+        /// PERFORMANCE: This method scans ALL inventory slots - monitor for performance issues
         /// </summary>
         private void ScanPlayerInventoryForThrowables()
         {
+            // PERFORMANCE: Use cache if available and recent (within 0.5 seconds)
+            float currentTime = Time.time;
+            if (inventoryScanCacheValid && (currentTime - lastInventoryScanTime) < INVENTORY_SCAN_CACHE_DURATION)
+            {
+                // Cache is valid - skip rescanning
+                return;
+            }
+            
             throwableSlotsByTypeID.Clear();
             throwableTypeIDsInOrder.Clear();
             lastItemCounts.Clear();
@@ -315,6 +931,7 @@ namespace BetterThrowingSystem
                 if (player == null)
                 {
                     Debug.LogWarning("[BTS] Player not found, cannot scan inventory slots.");
+                    inventoryScanCacheValid = false;
                     return;
                 }
                 
@@ -328,58 +945,81 @@ namespace BetterThrowingSystem
                 if (inventory == null)
                 {
                     Debug.LogWarning("[BTS] Inventory component not found on player!");
+                    inventoryScanCacheValid = false;
                     return;
                 }
                 
                 var inventoryType = inventory.GetType();
                 
-                // Try to get GetItem method
-                var getItemMethod = inventoryType.GetMethod(
-                    "GetItem",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                ) ?? inventoryType.GetMethod(
-                    "GetItemAt",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                ) ?? inventoryType.GetMethod(
-                    "GetSlotItem",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                );
+                // PERFORMANCE: Use cached GetItem method if available
+                var getItemMethod = cachedGetItemMethod;
+                if (getItemMethod == null)
+                {
+                    // Try to get GetItem method
+                    getItemMethod = inventoryType.GetMethod(
+                        "GetItem",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    ) ?? inventoryType.GetMethod(
+                        "GetItemAt",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    ) ?? inventoryType.GetMethod(
+                        "GetSlotItem",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    );
+                    cachedGetItemMethod = getItemMethod; // Cache for next time
+                }
                 
                 if (getItemMethod == null)
                 {
                     Debug.LogError("[BTS] Could not find method to get item from inventory slot!");
+                    inventoryScanCacheValid = false;
                     return;
                 }
                 
-                // Try to get max slots
-                var maxSlotsProp = inventoryType.GetProperty("maxSlots", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                var slotCountProp = inventoryType.GetProperty("SlotCount", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                var capacityProp = inventoryType.GetProperty("Capacity", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                var sizeProp = inventoryType.GetProperty("Size", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                
+                // PERFORMANCE: Use cached maxSlots to avoid repeated reflection
                 int maxSlots = 47; // Default
-                if (maxSlotsProp != null)
+                if (cachedInventoryType == inventoryType && cachedMaxSlots.HasValue)
                 {
-                    var value = maxSlotsProp.GetValue(inventory);
-                    if (value is int) maxSlots = (int)value;
+                    maxSlots = cachedMaxSlots.Value;
                 }
-                else if (slotCountProp != null)
+                else
                 {
-                    var value = slotCountProp.GetValue(inventory);
-                    if (value is int) maxSlots = (int)value;
-                }
-                else if (capacityProp != null)
-                {
-                    var value = capacityProp.GetValue(inventory);
-                    if (value is int) maxSlots = (int)value;
-                }
-                else if (sizeProp != null)
-                {
-                    var value = sizeProp.GetValue(inventory);
-                    if (value is int) maxSlots = (int)value;
+                    // Try to get max slots
+                    var maxSlotsProp = inventoryType.GetProperty("maxSlots", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    var slotCountProp = inventoryType.GetProperty("SlotCount", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    var capacityProp = inventoryType.GetProperty("Capacity", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    var sizeProp = inventoryType.GetProperty("Size", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    
+                    if (maxSlotsProp != null)
+                    {
+                        var value = maxSlotsProp.GetValue(inventory);
+                        if (value is int) maxSlots = (int)value;
+                    }
+                    else if (slotCountProp != null)
+                    {
+                        var value = slotCountProp.GetValue(inventory);
+                        if (value is int) maxSlots = (int)value;
+                    }
+                    else if (capacityProp != null)
+                    {
+                        var value = capacityProp.GetValue(inventory);
+                        if (value is int) maxSlots = (int)value;
+                    }
+                    else if (sizeProp != null)
+                    {
+                        var value = sizeProp.GetValue(inventory);
+                        if (value is int) maxSlots = (int)value;
+                    }
+                    
+                    cachedMaxSlots = maxSlots;
+                    cachedInventoryType = inventoryType;
                 }
                 
-                Debug.Log($"[BTS] Scanning ALL inventory slots 0-{maxSlots - 1} for throwables (grouped by TypeID)...");
+                // PERFORMANCE: Only log in debug mode
+                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                {
+                    Debug.Log($"[BTS] Scanning ALL inventory slots 0-{maxSlots - 1} for throwables (grouped by TypeID)...");
+                }
                 
                 // Scan ALL slots and group by TypeID
                 for (int slotIndex = 0; slotIndex < maxSlots; slotIndex++)
@@ -402,7 +1042,10 @@ namespace BetterThrowingSystem
                             // Store item count for throw detection
                             lastItemCounts[slotIndex] = GetItemCount(item);
                             
-                            Debug.Log($"[BTS] Found throwable in slot {slotIndex}: {item.name} (TypeID: {typeID})");
+                            if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                            {
+                                Debug.Log($"[BTS] Found throwable in slot {slotIndex}: {item.name} (TypeID: {typeID})");
+                            }
                         }
                     }
                     catch (System.Exception)
@@ -418,7 +1061,15 @@ namespace BetterThrowingSystem
                 }
                 
                 int totalCount = throwableSlotsByTypeID.Values.Sum(list => list.Count);
-                Debug.Log($"[BTS] Scanned inventory: Found {totalCount} throwable item(s) in {throwableTypeIDsInOrder.Count} category/categories: [{string.Join(", ", throwableTypeIDsInOrder.Select(id => $"TypeID {id}({throwableSlotsByTypeID[id].Count} slots)"))}]");
+                
+                // Mark cache as valid
+                lastInventoryScanTime = currentTime;
+                inventoryScanCacheValid = true;
+                
+                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                {
+                    Debug.Log($"[BTS] Scanned inventory: Found {totalCount} throwable item(s) in {throwableTypeIDsInOrder.Count} category/categories: [{string.Join(", ", throwableTypeIDsInOrder.Select(id => $"TypeID {id}({throwableSlotsByTypeID[id].Count} slots)"))}]");
+                }
                 
                 // Reset category index if current category is no longer available
                 if (currentCategoryIndex >= throwableTypeIDsInOrder.Count)
@@ -461,7 +1112,7 @@ namespace BetterThrowingSystem
                 if (getItemMethod == null) return result;
                 
                 // First pass: collect all throwables by TypeID
-                var throwablesByTypeID = new Dictionary<int, (int slot, string name, Sprite? icon)>();
+                var throwablesByTypeID = new Dictionary<int, (int slot, string name, Sprite icon)>();
                 
                 // Scan all slots (0-46) and group by TypeID
                 for (int slotIndex = 0; slotIndex < 47; slotIndex++)
@@ -476,9 +1127,9 @@ namespace BetterThrowingSystem
                             // Only keep the first slot for each TypeID
                             if (!throwablesByTypeID.ContainsKey(typeID))
                             {
-                                string rawItemName = item.name.Replace("(Clone)", "").Trim();
-                                string itemName = GetLocalizedItemName(rawItemName);
-                                Sprite? icon = null;
+                                // Get localized name from Item object (better source)
+                                string itemName = GetLocalizedItemName(item);
+                                Sprite icon = null;
                                 
                                 // Try to get icon
                                 try
@@ -585,7 +1236,7 @@ namespace BetterThrowingSystem
         /// <summary>
         /// Show selection mode bubble with current throwable name and icon
         /// </summary>
-        private void ShowSelectionModeBubble((int slot, int typeID, string name, Sprite? icon) throwable)
+        private void ShowSelectionModeBubble((int slot, int typeID, string name, Sprite icon) throwable)
         {
             try
             {
@@ -594,12 +1245,11 @@ namespace BetterThrowingSystem
                 
                 if (target == null) return;
                 
-                // Format bubble text with icon indicator (Unicode icon if available)
-                string iconIndicator = throwable.icon != null ? "🎯" : "💣";
-                string itemName = GetLocalizedItemName(throwable.name);
+                // Format bubble text (no icon indicator since emojis don't display properly)
+                // throwable.name is already localized from GetAllThrowablesByCategory()
                 string bubbleText = isChinese 
-                    ? $"投掷物选择中，{iconIndicator} {itemName}"
-                    : $"Selecting throwable, {iconIndicator} {itemName}";
+                    ? $"投掷物选择中：{throwable.name}"
+                    : $"Selecting throwable: {throwable.name}";
                 
                 Debug.Log($"[BTS] Showing selection bubble: {bubbleText} (Icon: {(throwable.icon != null ? "Available" : "None")})");
                 
@@ -683,22 +1333,19 @@ namespace BetterThrowingSystem
                         currentCategoryIndex = throwableTypeIDsInOrder.IndexOf(selected.typeID);
                     }
                     
-                    // Show confirmation bubble with icon indicator
-                    string iconIndicator = selected.icon != null ? "🎯" : "💣";
-                    string itemName = GetLocalizedItemName(selected.name);
+                    // Show confirmation bubble (selected.name is already localized from GetAllThrowablesByCategory)
                     string message = isChinese 
-                        ? $"✓ 已选择：{iconIndicator} {itemName}"
-                        : $"✓ Selected: {iconIndicator} {itemName}";
+                        ? $"✓ 已选择：{selected.name}"
+                        : $"✓ Selected: {selected.name}";
                     ShowDebugBubble(message);
                     
                     Debug.Log($"[BTS] ✓ Successfully equipped selected throwable category: {selected.name}");
                 }
                 else
                 {
-                    string itemName = GetLocalizedItemName(selected.name);
                     string message = isChinese 
-                        ? $"❌ 无法装备：{itemName}"
-                        : $"❌ Cannot equip: {itemName}";
+                        ? $"❌ 无法装备：{selected.name}"
+                        : $"❌ Cannot equip: {selected.name}";
                     ShowDebugBubble(message);
                     Debug.LogError($"[BTS] Failed to equip selected throwable: {selected.name}");
                 }
@@ -1579,7 +2226,19 @@ namespace BetterThrowingSystem
             // This ensures we save the weapon BEFORE any item changes
             
             // Rescan inventory slots to get up-to-date list (grouped by TypeID)
+            // PERFORMANCE: This method now uses caching to avoid rescanning on rapid G presses
+            Stopwatch scanInventoryStopwatch = new Stopwatch();
+            scanInventoryStopwatch.Restart();
             ScanPlayerInventoryForThrowables();
+            scanInventoryStopwatch.Stop();
+            if (ENABLE_PERFORMANCE_PROFILING && scanInventoryStopwatch.ElapsedMilliseconds > 1)
+            {
+                RecordMethodTiming("ScanPlayerInventoryForThrowables", scanInventoryStopwatch.ElapsedMilliseconds);
+                if (scanInventoryStopwatch.ElapsedMilliseconds > 10)
+                {
+                    UnityEngine.Debug.Log($"[BTS] ⚠️⚠️ ScanPlayerInventoryForThrowables took {scanInventoryStopwatch.ElapsedMilliseconds}ms - THIS IS A BOTTLENECK!");
+                }
+            }
             
             if (throwableTypeIDsInOrder.Count == 0)
             {
@@ -1603,18 +2262,63 @@ namespace BetterThrowingSystem
                                       lastSelectedThrowableSlot.HasValue &&
                                       lastEquippedThrowableSlot.Value == lastSelectedThrowableSlot.Value;
             
-            // NEW LOGIC: Smart throwable selection based on completion and continuity
-            // Rule 1: If throw completed AND continuous G key (last action was G), move to next category
-            // Rule 2: If throw NOT completed, always restore last selection (even if continuous G)
+            // NEW LOGIC: Smart throwable selection based on completion and availability
+            // Rule 1: If throw completed AND continuous G key (last action was G), check if last selected item still exists
+            //   - If last selected item still exists in inventory, continue using it (until it runs out)
+            //   - If last selected item no longer exists, move to next category
+            // Rule 2: If throw NOT completed OR just completed and back to weapon, restore last selection if it exists
             // Rule 3: If last action was weapon switch, restore last selection (user canceled throw)
             // Rule 4: If no last selection, start from first category
             
             bool isContinuousG = lastActionWasGKey && !lastActionWasWeaponSwitch;
             bool shouldSwitchCategory = hasCompletedThrow && isContinuousG;
             
-            Debug.Log($"[BTS] Selection logic - hasCompletedThrow: {hasCompletedThrow}, isContinuousG: {isContinuousG}, shouldSwitchCategory: {shouldSwitchCategory}, lastActionWasWeaponSwitch: {lastActionWasWeaponSwitch}");
+            // Check current equipped item to see if we're holding a weapon (not throwable)
+            var currentItem = GetCurrentHoldItem(player);
+            bool isCurrentlyHoldingWeapon = currentItem != null && !IsThrowableItem(currentItem);
+            bool isCurrentlyHoldingNothing = currentItem == null;
+            bool isBackToWeaponState = (isCurrentlyHoldingWeapon || isCurrentlyHoldingNothing) && hasCompletedThrow;
             
-            if (shouldSwitchCategory)
+            Debug.Log($"[BTS] Selection logic - hasCompletedThrow: {hasCompletedThrow}, isContinuousG: {isContinuousG}, shouldSwitchCategory: {shouldSwitchCategory}, lastActionWasWeaponSwitch: {lastActionWasWeaponSwitch}");
+            Debug.Log($"[BTS] Current state - HoldingWeapon: {isCurrentlyHoldingWeapon}, HoldingNothing: {isCurrentlyHoldingNothing}, BackToWeapon: {isBackToWeaponState}");
+            
+            // Check if last selected item still exists in inventory
+            bool lastSelectedItemStillExists = false;
+            if (lastSelectedThrowableSlot.HasValue && lastSelectedThrowableTypeID.HasValue)
+            {
+                int lastTypeID = lastSelectedThrowableTypeID.Value;
+                int lastSlot = lastSelectedThrowableSlot.Value;
+                
+                if (throwableSlotsByTypeID.ContainsKey(lastTypeID) && 
+                    throwableSlotsByTypeID[lastTypeID].Contains(lastSlot))
+                {
+                    lastSelectedItemStillExists = true;
+                    Debug.Log($"[BTS] Last selected item (TypeID: {lastTypeID}, Slot: {lastSlot}) still exists in inventory");
+                }
+                else
+                {
+                    Debug.Log($"[BTS] Last selected item (TypeID: {lastTypeID}, Slot: {lastSlot}) no longer exists in inventory");
+                }
+            }
+            
+            // Special case: If we just completed throw and are back to weapon state, and last selected item still exists,
+            // restore it (this handles "long press G select, then quick press G to use again" scenario)
+            if (isBackToWeaponState && lastSelectedItemStillExists && lastSelectedThrowableSlot.HasValue && lastSelectedThrowableTypeID.HasValue)
+            {
+                // We're back to weapon after throw, and the last selected item still exists - restore it
+                targetSlot = lastSelectedThrowableSlot.Value;
+                targetTypeID = lastSelectedThrowableTypeID.Value;
+                
+                currentCategoryIndex = throwableTypeIDsInOrder.IndexOf(targetTypeID);
+                if (currentCategoryIndex < 0) currentCategoryIndex = 0;
+                
+                categoryInfo = $"[继续使用]";
+                Debug.Log($"[BTS] ✓ Back to weapon after throw, restoring last selected item: TypeID {targetTypeID}, slot {targetSlot}");
+                
+                // Reset hasCompletedThrow since we're about to equip a new throwable
+                hasCompletedThrow = false;
+            }
+            else if (shouldSwitchCategory && !lastSelectedItemStillExists)
             {
                 // Rule 1: Throw completed + continuous G = move to next category
                 currentCategoryIndex = (currentCategoryIndex + 1) % throwableTypeIDsInOrder.Count;
@@ -1732,8 +2436,7 @@ namespace BetterThrowingSystem
                         var item = getItemMethod.Invoke(inventory, new object[] { targetSlot }) as Item;
                         if (item != null)
                         {
-                            string rawName = item.name.Replace("(Clone)", "").Trim();
-                            itemName = GetLocalizedItemName(rawName);
+                            itemName = GetLocalizedItemName(item);
                         }
                     }
                 }
@@ -1749,7 +2452,10 @@ namespace BetterThrowingSystem
                 var target = player.transform ?? Camera.main?.transform;
                 if (target != null)
                 {
-                    ShowDebugBubble($"💣 {categoryInfo} {itemName}");
+                    string message = isChinese 
+                        ? $"{itemName}"
+                        : $"{itemName}";
+                    ShowDebugBubble(message);
                 }
             }
             else
@@ -2033,20 +2739,27 @@ namespace BetterThrowingSystem
             
             try
             {
-                var player = FindPlayerCharacter();
+                // Use cached player and methods for better performance
+                var player = cachedPlayer ?? FindPlayerCharacter();
                 if (player == null) return;
                 
-                var inventory = player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>();
+                var inventory = cachedInventory ?? (player.GetComponent<Inventory>() ?? player.GetComponentInChildren<Inventory>());
                 if (inventory == null) return;
                 
-                var inventoryType = inventory.GetType();
-                var getItemMethod = inventoryType.GetMethod(
-                    "GetItem",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                ) ?? inventoryType.GetMethod(
-                    "GetItemAt",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
-                );
+                // Use cached method if available
+                var getItemMethod = cachedGetItemMethod;
+                if (getItemMethod == null)
+                {
+                    var inventoryType = inventory.GetType();
+                    getItemMethod = inventoryType.GetMethod(
+                        "GetItem",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    ) ?? inventoryType.GetMethod(
+                        "GetItemAt",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                    );
+                    cachedGetItemMethod = getItemMethod; // Cache for next time
+                }
                 
                 if (getItemMethod == null) return;
                 
@@ -2430,42 +3143,107 @@ namespace BetterThrowingSystem
 
         /// <summary>
         /// Check if an item is a throwable item using multiple detection methods
+        /// PERFORMANCE: Results are cached by TypeID to avoid repeated expensive checks
         /// </summary>
         private bool IsThrowableItem(Item item)
         {
             if (item == null) return false;
+            
+            // PERFORMANCE: Check cache first (TypeID-based caching)
+            int typeID = item.TypeID;
+            if (throwableItemCache.ContainsKey(typeID))
+            {
+                return throwableItemCache[typeID];
+            }
             
             // Remove (Clone) suffix for better matching
             var rawName = item.name ?? "";
             var name = rawName.ToLower().Replace("(clone)", "").Trim();
             var displayName = rawName.Replace("(Clone)", "").Trim();
             
-            Debug.Log($"[BTS] IsThrowableItem check: {item.name} (TypeID: {item.TypeID})");
+            if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+            {
+                Debug.Log($"[BTS] IsThrowableItem check: {item.name} (TypeID: {item.TypeID})");
+            }
             
             // STEP 0: Exclude known non-throwable items by TypeID (highest priority - blacklist)
+            // Also check item type/class name to exclude categories (totems, clothing, injections)
             int[] excludedTypeIDs = { 
                 12,  // BeanCan - 豆子罐头（不是投掷物）
-                25   // Flashlight - 手电筒（不是投掷物）
+                25,  // Flashlight - 手电筒（不是投掷物）
+                740, // WhiteGown - 白色长袍（衣服）
+                742, // GlassShiny - 可能是衣服或装饰品
+                800  // Injection_MeleeDamage - 针剂（不是投掷物）
             };
             if (excludedTypeIDs.Contains(item.TypeID))
             {
-                Debug.Log($"[BTS] Item {item.name} (TypeID: {item.TypeID}) excluded - in blacklist");
+                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                {
+                    Debug.Log($"[BTS] Item {item.name} (TypeID: {item.TypeID}) excluded - in blacklist");
+                }
+                throwableItemCache[typeID] = false;
                 return false;
             }
             
+            // Check item type name to exclude categories (totem, clothing, injection)
+            // This catches items by their class name, not just by item name
+            try
+            {
+                var itemTypeName = item.GetType().Name.ToLower();
+                if (itemTypeName.Contains("totem") || 
+                    itemTypeName.Contains("clothing") || 
+                    itemTypeName.Contains("clothes") || 
+                    itemTypeName.Contains("uniform") ||
+                    itemTypeName.Contains("gown") ||
+                    itemTypeName.Contains("injection") ||
+                    itemTypeName.Contains("syringe") ||
+                    itemTypeName.Contains("medicine") ||
+                    itemTypeName.Contains("med"))
+                {
+                    if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                    {
+                        Debug.Log($"[BTS] Item {item.name} (TypeID: {item.TypeID}, Type: {item.GetType().Name}) excluded - item type category");
+                    }
+                    throwableItemCache[typeID] = false;
+                    return false;
+                }
+            }
+            catch (System.Exception)
+            {
+                // Ignore reflection errors
+            }
+            
             // Exclude by name patterns that are definitely not throwables
+            // Enhanced exclusion list: totems, clothing, injections/medicine
             string[] excludedNamePatterns = {
+                // Food & consumables
                 "bean", "豆子", "罐头", "can", "candy", "糖果", "自制糖果",
+                // Tools
                 "flashlight", "手电",
+                // Weapons
                 "冲锋枪", "rifle", "gun", "weapon", "枪",
+                // Toys
                 "toy", "玩具", "cannon", "大炮", "玩具大炮",
-                "rubber", "橡胶", "工作服", "uniform", "suit"
+                // Clothing & uniforms (all clothing items)
+                "rubber", "橡胶", "工作服", "uniform", "suit", "clothing", "clothes", 
+                "衣服", "服装", "gown", "dress", "shirt", "pants", "jacket", "coat", 
+                "vest", "boots", "shoes", "hat", "cap", "helmet", "gloves", "手套",
+                "armor", "护甲", "workwear", "工作装", "防护服",
+                // Totems (all totems should be excluded)
+                "totem", "图腾",
+                // Injections & medicine (all medical items)
+                "injection", "针剂", "syringe", "注射器", "medicine", "药品", 
+                "med", "pill", "药丸", "drug", "药物", "heal", "治疗", "cure", "治愈"
             };
             foreach (var pattern in excludedNamePatterns)
             {
                 if (name.Contains(pattern.ToLower()) && !IsThrowableException(item, pattern))
                 {
-                    Debug.Log($"[BTS] Item {item.name} excluded - matches excluded pattern: {pattern}");
+                    if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                    {
+                        Debug.Log($"[BTS] Item {item.name} excluded - matches excluded pattern: {pattern}");
+                    }
+                    throwableItemCache[typeID] = false;
                     return false;
                 }
             }
@@ -2483,7 +3261,11 @@ namespace BetterThrowingSystem
             };
             if (throwableTypeIDs.Contains(item.TypeID))
             {
-                Debug.Log($"[BTS] ✅ Item {item.name} (TypeID: {item.TypeID}) identified as throwable - TypeID whitelist");
+                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                {
+                    Debug.Log($"[BTS] ✅ Item {item.name} (TypeID: {item.TypeID}) identified as throwable - TypeID whitelist");
+                }
+                throwableItemCache[typeID] = true;
                 return true;
             }
             
@@ -2502,7 +3284,11 @@ namespace BetterThrowingSystem
                             string skillTypeStr = skillType.ToString().ToLower();
                             if (skillTypeStr.Contains("item") || skillTypeStr.Contains("throw"))
                             {
-                                Debug.Log($"[BTS] Item {item.name} identified as throwable via SkillType: {skillType}");
+                                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                                {
+                                    Debug.Log($"[BTS] Item {item.name} identified as throwable via SkillType: {skillType}");
+                                }
+                                throwableItemCache[typeID] = true;
                                 return true;
                             }
                         }
@@ -2532,7 +3318,11 @@ namespace BetterThrowingSystem
                             var value = prop.GetValue(item);
                             if (value is bool && (bool)value)
                             {
-                                Debug.Log($"[BTS] Item {item.name} identified as throwable via property {propName}");
+                                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                                {
+                                    Debug.Log($"[BTS] Item {item.name} identified as throwable via property {propName}");
+                                }
+                                throwableItemCache[typeID] = true;
                                 return true;
                             }
                         }
@@ -2552,7 +3342,11 @@ namespace BetterThrowingSystem
                             var result = method.Invoke(item, null);
                             if (result is bool && (bool)result)
                             {
-                                Debug.Log($"[BTS] Item {item.name} identified as throwable via method {methodName}()");
+                                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                                {
+                                    Debug.Log($"[BTS] Item {item.name} identified as throwable via method {methodName}()");
+                                }
+                                throwableItemCache[typeID] = true;
                                 return true;
                             }
                         }
@@ -2567,13 +3361,14 @@ namespace BetterThrowingSystem
             
             // STEP 4: Check by item name keywords (least reliable - use as fallback only)
             // Only use precise keywords that won't cause false positives
+            // IMPORTANT: These keywords should NOT match totems, clothing, or injections
             string[] throwableKeywords = {
                 "grenade", "手雷",
-                "flash", "闪光",
+                "flash", "闪光",  // Note: "flash" should not match "flashlight" (already excluded)
                 "smoke", "烟雾",
                 "molotov", "燃烧瓶",
                 "tox", "毒气",
-                "elec", "电",
+                "elec", "电",  // Note: "elec" should not match "抗电" (electric resistance) - should be excluded by other checks
                 "bomb", "炸弹", "管状", "集数",
                 "dynamite", "炸药", "集束",
                 "tube", "canister",  // Removed "can" to avoid BeanCan false positive
@@ -2582,15 +3377,43 @@ namespace BetterThrowingSystem
                 "explosive", "爆炸"
             };
             
+            // Additional check: If item name contains excluded category keywords, don't match throwable keywords
+            // This prevents false positives like "Totem_Flash" being matched by "flash" keyword
+            // Also prevents "Totem_抗电3" from being matched by "elec" keyword
+            bool containsExcludedCategory = name.Contains("totem") || name.Contains("图腾") ||
+                                           name.Contains("clothing") || name.Contains("clothes") || name.Contains("衣服") ||
+                                           name.Contains("uniform") || name.Contains("工作服") || name.Contains("gown") ||
+                                           name.Contains("injection") || name.Contains("针剂") || name.Contains("syringe") ||
+                                           name.Contains("medicine") || name.Contains("药品") || name.Contains("med") ||
+                                           name.Contains("rubber") || name.Contains("橡胶") ||
+                                           name.Contains("抗电") || name.Contains("抗火") || name.Contains("抗毒") ||
+                                           name.Contains("resist") || name.Contains("resistance"); // Resistance totems
+            
+            if (containsExcludedCategory)
+            {
+                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                {
+                    Debug.Log($"[BTS] Item {item.name} excluded - contains excluded category keyword, even if it matches throwable keywords");
+                }
+                throwableItemCache[typeID] = false;
+                return false;
+            }
+            
             foreach (var keyword in throwableKeywords)
             {
                 if (name.Contains(keyword.ToLower()) || displayName.Contains(keyword))
                 {
-                    Debug.Log($"[BTS] Item {item.name} identified as throwable via keyword: {keyword}");
+                    if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                    {
+                        Debug.Log($"[BTS] Item {item.name} identified as throwable via keyword: {keyword}");
+                    }
+                    throwableItemCache[typeID] = true;
                     return true;
                 }
             }
             
+            // Item is not throwable - cache the result
+            throwableItemCache[typeID] = false;
             return false;
         }
         
@@ -2961,10 +3784,87 @@ namespace BetterThrowingSystem
         }
         
         /// <summary>
-        /// Get localized item name (Chinese or English)
+        /// Get localized item name (Chinese or English) from Item object
         /// </summary>
-        private string GetLocalizedItemName(string rawItemName)
+        private string GetLocalizedItemName(Item? item, string rawItemName = "")
         {
+            // Try to get name from Item object first (better source)
+            if (item != null)
+            {
+                try
+                {
+                    var itemType = item.GetType();
+                    
+                    // Try various properties that might contain the display name
+                    string[] possibleProperties = {
+                        "DisplayName", "LocalizedName", "ItemName", "Name", 
+                        "GetDisplayName", "GetLocalizedName", "GetItemName"
+                    };
+                    
+                    foreach (var propName in possibleProperties)
+                    {
+                        // Try property first
+                        var prop = itemType.GetProperty(propName,
+                            System.Reflection.BindingFlags.Public |
+                            System.Reflection.BindingFlags.Instance |
+                            System.Reflection.BindingFlags.NonPublic);
+                        
+                        if (prop != null)
+                        {
+                            try
+                            {
+                                var value = prop.GetValue(item);
+                                if (value != null && !string.IsNullOrEmpty(value.ToString()))
+                                {
+                                    string name = value.ToString();
+                                    if (!name.Contains("(Clone)"))
+                                    {
+                                        Debug.Log($"[BTS] Got item name from property {propName}: {name}");
+                                        return name;
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                        
+                        // Try method
+                        var method = itemType.GetMethod(propName,
+                            System.Reflection.BindingFlags.Public |
+                            System.Reflection.BindingFlags.Instance |
+                            System.Reflection.BindingFlags.NonPublic,
+                            null,
+                            new System.Type[0],
+                            null);
+                        
+                        if (method != null && method.ReturnType == typeof(string))
+                        {
+                            try
+                            {
+                                var result = method.Invoke(item, null);
+                                if (result != null && !string.IsNullOrEmpty(result.ToString()))
+                                {
+                                    string name = result.ToString();
+                                    Debug.Log($"[BTS] Got item name from method {propName}(): {name}");
+                                    return name;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    
+                    // Fallback to item.name
+                    if (!string.IsNullOrEmpty(item.name))
+                    {
+                        rawItemName = item.name;
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogWarning($"[BTS] Error getting name from Item object: {e.Message}");
+                }
+            }
+            
+            // If no item provided or failed, use raw name
             if (string.IsNullOrEmpty(rawItemName))
             {
                 return "Unknown";
@@ -2978,10 +3878,7 @@ namespace BetterThrowingSystem
             {
                 try
                 {
-                    // Method 1: Try to find Item's localized name property
-                    // Items might have a LocalizedName or DisplayName property
-                    
-                    // Method 2: Use localization system if available
+                    // Method 1: Use localization system if available
                     var localizationType = System.Type.GetType("SodaLocalization.Localization") ?? 
                                           System.Type.GetType("TeamSoda.MiniLocalizor.Localization");
                     
@@ -3006,23 +3903,6 @@ namespace BetterThrowingSystem
                         }
                     }
                     
-                    // Method 3: Try to get from ItemAssetsCollection
-                    // The item asset might have localized name stored
-                    try
-                    {
-                        var itemAssetsType = typeof(ItemAssetsCollection);
-                        var getAssetMethod = itemAssetsType.GetMethod("GetAsset",
-                            System.Reflection.BindingFlags.Public | 
-                            System.Reflection.BindingFlags.Static);
-                        
-                        if (getAssetMethod != null)
-                        {
-                            // Try different approaches to get item asset
-                            // This requires knowing the TypeID, which we might not have here
-                        }
-                    }
-                    catch { }
-                    
                     // Fallback: Return clean name (might already be Chinese)
                     // Many games use Chinese names directly in the item.name
                     return cleanName;
@@ -3036,10 +3916,533 @@ namespace BetterThrowingSystem
             else
             {
                 // English mode: Return English name
-                // If the name contains Chinese characters, we might need to translate
-                // For now, return as-is (assuming item.name is already in English)
                 return cleanName;
             }
+        }
+        
+        /// <summary>
+        /// Get localized item name from raw name string (backward compatibility)
+        /// </summary>
+        private string GetLocalizedItemName(string rawItemName)
+        {
+            return GetLocalizedItemName(null, rawItemName);
+        }
+        
+        /// <summary>
+        /// Open radial menu (wheel menu) for throwable selection
+        /// </summary>
+        private void OpenRadialMenu()
+        {
+            try
+            {
+                var throwablesList = GetAllThrowablesByCategory();
+                if (throwablesList.Count == 0)
+                {
+                    ShowDebugBubble(isChinese ? "❌ 背包中没有投掷物" : "❌ No throwables in inventory");
+                    return;
+                }
+                
+                Debug.Log("[BTS] =========================================");
+                Debug.Log("[BTS] ========== OPENING RADIAL MENU ==========");
+                Debug.Log($"[BTS] Found {throwablesList.Count} throwable categories");
+                Debug.Log("[BTS] =========================================");
+                
+                // Create canvas if it doesn't exist
+                if (radialMenuCanvas == null)
+                {
+                    CreateRadialMenuCanvas();
+                }
+                
+                if (radialMenuCanvas == null)
+                {
+                    Debug.LogError("[BTS] Failed to create radial menu canvas!");
+                    return;
+                }
+                
+                // Clear existing items
+                ClearRadialMenuItems();
+                
+                // Ensure container is not rotated
+                if (radialMenuContainer != null)
+                {
+                    radialMenuContainer.localRotation = Quaternion.identity;
+                }
+                
+                // Create menu items for each throwable
+                for (int i = 0; i < throwablesList.Count; i++)
+                {
+                    CreateRadialMenuItem(throwablesList[i], i, throwablesList.Count);
+                }
+                
+                // Set 12 o'clock position (top) as default selection
+                radialMenuSelectedIndex = 0; // First item is at 12 o'clock
+                if (radialMenuItems.Count > 0)
+                {
+                    UpdateRadialMenuItemHighlight(0, true);
+                }
+                
+                // Show canvas
+                radialMenuCanvas.SetActive(true);
+                isRadialMenuOpen = true;
+                
+                // Lock cursor to center (optional, can be disabled if player wants to look around)
+                // Cursor.lockState = CursorLockMode.Locked;
+                // Cursor.visible = true;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error opening radial menu: {e.Message}\n{e.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// Create the radial menu canvas and container
+        /// </summary>
+        private void CreateRadialMenuCanvas()
+        {
+            try
+            {
+                // Create Canvas
+                GameObject canvasObj = new GameObject("RadialMenuCanvas");
+                Canvas canvas = canvasObj.AddComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                canvas.sortingOrder = 1000; // High sorting order to appear on top
+                
+                CanvasScaler scaler = canvasObj.AddComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                scaler.referenceResolution = new Vector2(1920, 1080);
+                
+                canvasObj.AddComponent<GraphicRaycaster>();
+                
+                // Ensure EventSystem exists (needed for UI interactions)
+                if (UnityEngine.EventSystems.EventSystem.current == null)
+                {
+                    GameObject eventSystemObj = new GameObject("EventSystem");
+                    eventSystemObj.AddComponent<UnityEngine.EventSystems.EventSystem>();
+                    eventSystemObj.AddComponent<UnityEngine.EventSystems.StandaloneInputModule>();
+                }
+                
+                // Create background (optional, can be a semi-transparent overlay)
+                GameObject bgObj = new GameObject("Background");
+                bgObj.transform.SetParent(canvasObj.transform, false);
+                Image bgImage = bgObj.AddComponent<Image>();
+                bgImage.color = new Color(0, 0, 0, 0.3f); // Semi-transparent black
+                
+                RectTransform bgRect = bgObj.GetComponent<RectTransform>();
+                bgRect.anchorMin = Vector2.zero;
+                bgRect.anchorMax = Vector2.one;
+                bgRect.sizeDelta = Vector2.zero;
+                
+                // Create container for radial menu items (centered on screen)
+                GameObject containerObj = new GameObject("RadialMenuContainer");
+                containerObj.transform.SetParent(canvasObj.transform, false);
+                RectTransform containerRect = containerObj.AddComponent<RectTransform>();
+                containerRect.anchorMin = new Vector2(0.5f, 0.5f);
+                containerRect.anchorMax = new Vector2(0.5f, 0.5f);
+                containerRect.anchoredPosition = Vector2.zero;
+                containerRect.sizeDelta = new Vector2(RADIAL_MENU_RADIUS * 2 + RADIAL_MENU_ITEM_SIZE, RADIAL_MENU_RADIUS * 2 + RADIAL_MENU_ITEM_SIZE);
+                
+                radialMenuCanvas = canvasObj;
+                radialMenuContainer = containerRect;
+                
+                // Initially hide the canvas
+                radialMenuCanvas.SetActive(false);
+                
+                Debug.Log("[BTS] Radial menu canvas created successfully");
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error creating radial menu canvas: {e.Message}\n{e.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// Create a single radial menu item
+        /// </summary>
+        private void CreateRadialMenuItem((int slot, int typeID, string name, Sprite icon) throwable, int index, int totalCount)
+        {
+            try
+            {
+                if (radialMenuContainer == null) return;
+                
+                // Calculate angle for this item (always use base angle, rotation is applied to container)
+                // Base angle: -90 to start at top (12 o'clock)
+                float angleStep = 360f / totalCount;
+                float baseAngle = index * angleStep - 90f; // -90 to start at top (12 o'clock)
+                float angleRad = baseAngle * Mathf.Deg2Rad;
+                
+                // Calculate position using base angle (rotation will be applied to container)
+                float x = Mathf.Cos(angleRad) * RADIAL_MENU_RADIUS;
+                float y = Mathf.Sin(angleRad) * RADIAL_MENU_RADIUS;
+                
+                // Create item GameObject
+                GameObject itemObj = new GameObject($"RadialMenuItem_{index}_{throwable.name}");
+                itemObj.transform.SetParent(radialMenuContainer, false);
+                
+                RectTransform itemRect = itemObj.AddComponent<RectTransform>();
+                itemRect.anchorMin = new Vector2(0.5f, 0.5f);
+                itemRect.anchorMax = new Vector2(0.5f, 0.5f);
+                itemRect.anchoredPosition = new Vector2(x, y);
+                itemRect.sizeDelta = new Vector2(RADIAL_MENU_ITEM_SIZE, RADIAL_MENU_ITEM_SIZE);
+                
+                // Create background (circle)
+                GameObject bgObj = new GameObject("Background");
+                bgObj.transform.SetParent(itemObj.transform, false);
+                Image bgImage = bgObj.AddComponent<Image>();
+                bgImage.color = new Color(0.2f, 0.2f, 0.2f, 0.8f);
+                
+                // Try to make it circular (would need a sprite, for now use square)
+                RectTransform bgRect = bgObj.GetComponent<RectTransform>();
+                bgRect.anchorMin = Vector2.zero;
+                bgRect.anchorMax = Vector2.one;
+                bgRect.sizeDelta = Vector2.zero;
+                
+                // Create icon image
+                GameObject iconObj = new GameObject("Icon");
+                iconObj.transform.SetParent(itemObj.transform, false);
+                Image iconImage = iconObj.AddComponent<Image>();
+                
+                if (throwable.icon != null)
+                {
+                    iconImage.sprite = throwable.icon;
+                }
+                else
+                {
+                    // Use default icon or create a simple colored square
+                    iconImage.color = new Color(0.8f, 0.8f, 0.8f, 1f);
+                }
+                
+                RectTransform iconRect = iconObj.GetComponent<RectTransform>();
+                iconRect.anchorMin = new Vector2(0.2f, 0.2f);
+                iconRect.anchorMax = new Vector2(0.8f, 0.8f);
+                iconRect.sizeDelta = Vector2.zero;
+                
+                // Create text label (throwable.name is already localized from GetAllThrowablesByCategory())
+                GameObject textObj = new GameObject("Label");
+                textObj.transform.SetParent(itemObj.transform, false);
+                Text text = textObj.AddComponent<Text>();
+                text.text = throwable.name;
+                text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                text.fontSize = 14;
+                text.alignment = TextAnchor.MiddleCenter;
+                text.color = Color.white;
+                
+                RectTransform textRect = textObj.GetComponent<RectTransform>();
+                textRect.anchorMin = new Vector2(0f, -0.3f);
+                textRect.anchorMax = new Vector2(1f, -0.1f);
+                textRect.sizeDelta = Vector2.zero;
+                
+                // Store throwable data in the GameObject
+                RadialMenuItemData data = itemObj.AddComponent<RadialMenuItemData>();
+                data.slot = throwable.slot;
+                data.typeID = throwable.typeID;
+                data.name = throwable.name;
+                data.index = index;
+                
+                radialMenuItems.Add(itemObj);
+                
+                Debug.Log($"[BTS] Created radial menu item {index}: {throwable.name} at angle {baseAngle}°");
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error creating radial menu item: {e.Message}\n{e.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// Clear all radial menu items
+        /// </summary>
+        private void ClearRadialMenuItems()
+        {
+            foreach (var item in radialMenuItems)
+            {
+                if (item != null)
+                {
+                    UnityEngine.Object.Destroy(item);
+                }
+            }
+            radialMenuItems.Clear();
+        }
+        
+        /// <summary>
+        /// Handle mouse scroll wheel to change selection (highlight only, no rotation)
+        /// PERFORMANCE OPTIMIZED: Removed expensive mouse position calculations
+        /// </summary>
+        private void HandleRadialMenuScroll()
+        {
+            if (radialMenuItems.Count == 0) return;
+            
+            float scrollDelta = Input.GetAxis("Mouse ScrollWheel");
+            
+            // More sensitive: respond to smaller scroll input
+            if (Mathf.Abs(scrollDelta) > 0.001f)
+            {
+                // PERFORMANCE: Removed expensive RectTransformUtility.ScreenPointToLocalPointInRectangle call
+                // Mouse tracking disabled - scroll wheel always works
+                int currentIndex = radialMenuSelectedIndex >= 0 ? radialMenuSelectedIndex : 0;
+                int newIndex = currentIndex;
+                
+                if (scrollDelta > 0f)
+                {
+                    // Scroll up - move to previous item (counter-clockwise, index decreases)
+                    newIndex = currentIndex - 1;
+                    if (newIndex < 0) newIndex = radialMenuItems.Count - 1;
+                }
+                else
+                {
+                    // Scroll down - move to next item (clockwise, index increases)
+                    newIndex = currentIndex + 1;
+                    if (newIndex >= radialMenuItems.Count) newIndex = 0;
+                }
+                
+                // Update selection
+                if (newIndex != currentIndex)
+                {
+                    // Deselect old item
+                    if (currentIndex >= 0 && currentIndex < radialMenuItems.Count)
+                    {
+                        UpdateRadialMenuItemHighlight(currentIndex, false);
+                    }
+                    
+                    // Select new item
+                    radialMenuSelectedIndex = newIndex;
+                    if (radialMenuSelectedIndex >= 0 && radialMenuSelectedIndex < radialMenuItems.Count)
+                    {
+                        UpdateRadialMenuItemHighlight(radialMenuSelectedIndex, true);
+                    }
+                    
+                    Debug.Log($"[BTS] Radial menu scroll: {currentIndex} -> {newIndex}");
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Update radial menu selection based on mouse position
+        /// </summary>
+        private void UpdateRadialMenuSelection()
+        {
+            if (radialMenuContainer == null || radialMenuItems.Count == 0) return;
+            
+            try
+            {
+                // Get mouse position in screen space
+                Vector2 mousePos = Input.mousePosition;
+                
+                // Convert to canvas space
+                Canvas? canvas = radialMenuContainer.GetComponentInParent<Canvas>();
+                Camera? uiCamera = canvas?.worldCamera ?? (canvas?.renderMode == RenderMode.ScreenSpaceOverlay ? null : Camera.main);
+                
+                Vector2 localMousePos;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    radialMenuContainer,
+                    mousePos,
+                    uiCamera,
+                    out localMousePos
+                );
+                
+                // Calculate angle from center (no rotation offset needed)
+                float angle = Mathf.Atan2(localMousePos.y, localMousePos.x) * Mathf.Rad2Deg;
+                angle += 90f; // Adjust to start at top
+                if (angle < 0) angle += 360f;
+                if (angle >= 360f) angle -= 360f;
+                
+                // Calculate distance from center
+                float distance = Vector2.Distance(Vector2.zero, localMousePos);
+                
+                // Calculate angle step
+                float angleStep = 360f / radialMenuItems.Count;
+                
+                // Check if mouse is within selection radius (increased tolerance for better selection)
+                if (distance > RADIAL_MENU_RADIUS + RADIAL_MENU_SELECTION_TOLERANCE)
+                {
+                    // Mouse too far from center, keep current selection (don't change)
+                    return;
+                }
+                
+                // Calculate which item should be selected based on angle
+                int selectedIndex = Mathf.FloorToInt((angle + angleStep * 0.5f) / angleStep) % radialMenuItems.Count;
+                if (selectedIndex < 0) selectedIndex += radialMenuItems.Count;
+                
+                // Update selection
+                if (selectedIndex != radialMenuSelectedIndex)
+                {
+                    // Deselect old item
+                    if (radialMenuSelectedIndex >= 0 && radialMenuSelectedIndex < radialMenuItems.Count)
+                    {
+                        UpdateRadialMenuItemHighlight(radialMenuSelectedIndex, false);
+                    }
+                    
+                    // Select new item
+                    radialMenuSelectedIndex = selectedIndex;
+                    if (radialMenuSelectedIndex >= 0 && radialMenuSelectedIndex < radialMenuItems.Count)
+                    {
+                        UpdateRadialMenuItemHighlight(radialMenuSelectedIndex, true);
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error updating radial menu selection: {e.Message}\n{e.StackTrace}");
+            }
+        }
+        
+        /// <summary>
+        /// Update highlight state of a radial menu item
+        /// </summary>
+        private void UpdateRadialMenuItemHighlight(int index, bool highlight)
+        {
+            if (index < 0 || index >= radialMenuItems.Count) return;
+            
+            try
+            {
+                GameObject itemObj = radialMenuItems[index];
+                if (itemObj == null) return;
+                
+                // Find background image
+                Transform bgTransform = itemObj.transform.Find("Background");
+                if (bgTransform != null)
+                {
+                    Image bgImage = bgTransform.GetComponent<Image>();
+                    if (bgImage != null)
+                    {
+                        bgImage.color = highlight 
+                            ? new Color(0.4f, 0.6f, 0.9f, 0.9f) // Blue highlight
+                            : new Color(0.2f, 0.2f, 0.2f, 0.8f); // Dark background
+                    }
+                }
+                
+                // Scale up slightly when selected
+                RectTransform itemRect = itemObj.GetComponent<RectTransform>();
+                if (itemRect != null)
+                {
+                    itemRect.localScale = highlight ? Vector3.one * 1.2f : Vector3.one;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error updating item highlight: {e.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Close radial menu and equip selected item
+        /// </summary>
+        private void CloseRadialMenuAndEquip()
+        {
+            try
+            {
+                if (!isRadialMenuOpen) return;
+                
+                var player = FindPlayerCharacter();
+                if (player == null)
+                {
+                    Debug.LogError("[BTS] Player not found, cannot equip selected throwable");
+                    CloseRadialMenu();
+                    return;
+                }
+                
+                // Use current selection (or default to index 0 if invalid)
+                int itemIndexToEquip = radialMenuSelectedIndex;
+                if (itemIndexToEquip < 0 || itemIndexToEquip >= radialMenuItems.Count)
+                {
+                    itemIndexToEquip = 0;
+                    Debug.Log($"[BTS] Invalid selection index, using default (index 0)");
+                }
+                
+                if (itemIndexToEquip >= 0 && itemIndexToEquip < radialMenuItems.Count)
+                {
+                    var itemObj = radialMenuItems[itemIndexToEquip];
+                    var itemData = itemObj?.GetComponent<RadialMenuItemData>();
+                    
+                    if (itemData != null)
+                    {
+                        Debug.Log($"[BTS] =========================================");
+                        Debug.Log($"[BTS] ========== RADIAL MENU SELECTION ==========");
+                        Debug.Log($"[BTS] Selected: {itemData.name} (Slot {itemData.slot}, TypeID {itemData.typeID})");
+                        Debug.Log("[BTS] =========================================");
+                        
+                        // Save current weapon before switching (same as quick press G)
+                        SaveCurrentEquippedSlot(player);
+                        
+                        // Equip the selected throwable
+                        if (SwitchToSlot(itemData.slot))
+                        {
+                            lastEquippedThrowableSlot = itemData.slot;
+                            lastSelectedThrowableSlot = itemData.slot;
+                            lastSelectedThrowableTypeID = itemData.typeID;
+                            
+                            // Update category index
+                            if (throwableTypeIDsInOrder.Contains(itemData.typeID))
+                            {
+                                currentCategoryIndex = throwableTypeIDsInOrder.IndexOf(itemData.typeID);
+                            }
+                            
+                            // Mark that we started throwing process (for throw detection)
+                            // This ensures OnThrowCompleted() will be called and weapon will be switched back
+                            hasCompletedThrow = false; // Reset flag - throw hasn't completed yet
+                            isThrowingInProgress = false; // Will be set when we actually start holding throwable
+                            wasHoldingThrowable = false; // Reset tracking
+                            
+                            // Show confirmation bubble (itemData.name is already localized when created)
+                            string message = isChinese 
+                                ? $"✓ 已选择：{itemData.name}"
+                                : $"✓ Selected: {itemData.name}";
+                            ShowDebugBubble(message);
+                            
+                            Debug.Log($"[BTS] ✓ Successfully equipped selected throwable via radial menu: {itemData.name}");
+                            Debug.Log($"[BTS] Previous weapon saved - SlotHash: {previousEquippedSlotHash}, SlotKey: '{previousEquippedSlotKey}'");
+                            Debug.Log($"[BTS] Throw detection active - will auto-switch back to weapon after throw completion");
+                        }
+                        else
+                        {
+                            string message = isChinese 
+                                ? $"❌ 无法装备：{itemData.name}"
+                                : $"❌ Cannot equip: {itemData.name}";
+                            ShowDebugBubble(message);
+                            Debug.LogError($"[BTS] Failed to equip selected throwable: {itemData.name}");
+                        }
+                        
+                        lastActionWasGKey = true;
+                        lastActionWasWeaponSwitch = false;
+                    }
+                }
+                else
+                {
+                    // No item selected, just close menu
+                    Debug.Log("[BTS] Radial menu closed without selection");
+                }
+                
+                CloseRadialMenu();
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[BTS] Error closing radial menu and equipping: {e.Message}\n{e.StackTrace}");
+                CloseRadialMenu();
+            }
+        }
+        
+        /// <summary>
+        /// Close the radial menu
+        /// </summary>
+        private void CloseRadialMenu()
+        {
+            if (radialMenuCanvas != null)
+            {
+                radialMenuCanvas.SetActive(false);
+            }
+            isRadialMenuOpen = false;
+            radialMenuSelectedIndex = -1;
+        }
+        
+        /// <summary>
+        /// Component to store radial menu item data
+        /// </summary>
+        private class RadialMenuItemData : MonoBehaviour
+        {
+            public int slot;
+            public int typeID;
+            public new string name = "";  // Use 'new' to hide inherited Object.name
+            public int index;
         }
         
         /// <summary>
@@ -3047,6 +4450,22 @@ namespace BetterThrowingSystem
         /// </summary>
         private CharacterMainControl? FindPlayerCharacter()
         {
+            // PERFORMANCE: Use cached player if available and valid
+            // CRITICAL FIX: This check MUST come first to prevent FindObjectsOfType from being called every frame
+            // This was causing severe FPS drops on low-end systems (100+ FPS loss)
+            if (cachedPlayer != null && cachedPlayer.gameObject != null && cachedPlayer.gameObject.activeInHierarchy)
+            {
+                // Only refresh if cache is very old (4 seconds)
+                // This prevents FindObjectsOfType from being called every frame
+                float timeSinceCache = Time.time - lastPlayerCacheTime;
+                if (timeSinceCache < PLAYER_CACHE_REFRESH_INTERVAL * 2f)
+                {
+                    // Cache is valid - return immediately without any expensive operations
+                    // This is the most important performance optimization
+                    return cachedPlayer;
+                }
+            }
+            
             // Method 1: Try to find by Camera.main (player usually has the main camera)
             if (Camera.main != null && Camera.main.transform != null)
             {
@@ -3056,13 +4475,28 @@ namespace BetterThrowingSystem
                 {
                     if (IsPlayerCharacter(characterFromCamera))
                     {
-                        Debug.Log("[BTS] Found player via Camera.main parent");
+                        // PERFORMANCE: Cache player and update cache time
+                        cachedPlayer = characterFromCamera;
+                        lastPlayerCacheTime = Time.time;
+                        if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                        {
+                            Debug.Log("[BTS] Found player via Camera.main parent");
+                        }
                         return characterFromCamera;
                     }
                 }
                 
                 // Or check if camera follows a CharacterMainControl (common pattern)
+                // PERFORMANCE WARNING: FindObjectsOfType is expensive - only called when cache is invalid
+                Stopwatch findObjectsStopwatch = new Stopwatch();
+                findObjectsStopwatch.Restart();
                 var allCharacters = FindObjectsOfType<CharacterMainControl>();
+                findObjectsStopwatch.Stop();
+                if (ENABLE_PERFORMANCE_PROFILING && findObjectsStopwatch.ElapsedMilliseconds > 5)
+                {
+                    UnityEngine.Debug.Log($"[BTS] ⚠️⚠️ FindObjectsOfType<CharacterMainControl> took {findObjectsStopwatch.ElapsedMilliseconds}ms - THIS IS A BOTTLENECK!");
+                }
+                
                 foreach (var character in allCharacters)
                 {
                     if (IsPlayerCharacter(character))
@@ -3071,7 +4505,13 @@ namespace BetterThrowingSystem
                         float distance = Vector3.Distance(Camera.main.transform.position, character.transform.position);
                         if (distance < 10f) // Player should be close to camera
                         {
-                            Debug.Log($"[BTS] Found player near camera (distance: {distance})");
+                            // PERFORMANCE: Cache player and update cache time
+                            cachedPlayer = character;
+                            lastPlayerCacheTime = Time.time;
+                            if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                            {
+                                Debug.Log($"[BTS] Found player near camera (distance: {distance})");
+                            }
                             return character;
                         }
                     }
@@ -3079,12 +4519,26 @@ namespace BetterThrowingSystem
             }
             
             // Method 2: Find all CharacterMainControl and filter for player
+            // PERFORMANCE WARNING: FindObjectsOfType is expensive
+            Stopwatch findObjects2Stopwatch = new Stopwatch();
+            findObjects2Stopwatch.Restart();
             var allChars = FindObjectsOfType<CharacterMainControl>();
+            findObjects2Stopwatch.Stop();
+            if (ENABLE_PERFORMANCE_PROFILING && findObjects2Stopwatch.ElapsedMilliseconds > 5)
+            {
+                UnityEngine.Debug.Log($"[BTS] ⚠️⚠️ FindObjectsOfType<CharacterMainControl> (Method 2) took {findObjects2Stopwatch.ElapsedMilliseconds}ms - THIS IS A BOTTLENECK!");
+            }
             foreach (var character in allChars)
             {
                 if (IsPlayerCharacter(character))
                 {
-                    Debug.Log("[BTS] Found player via IsPlayerCharacter check");
+                    // PERFORMANCE: Cache player and update cache time
+                    cachedPlayer = character;
+                    lastPlayerCacheTime = Time.time;
+                    if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                    {
+                        Debug.Log("[BTS] Found player via IsPlayerCharacter check");
+                    }
                     return character;
                 }
             }
@@ -3096,7 +4550,13 @@ namespace BetterThrowingSystem
                 var character = playerObj.GetComponent<CharacterMainControl>();
                 if (character != null)
                 {
-                    Debug.Log("[BTS] Found player via Player tag");
+                    // PERFORMANCE: Cache player and update cache time
+                    cachedPlayer = character;
+                    lastPlayerCacheTime = Time.time;
+                    if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                    {
+                        Debug.Log("[BTS] Found player via Player tag");
+                    }
                     return character;
                 }
             }
@@ -3105,7 +4565,13 @@ namespace BetterThrowingSystem
             // This allows the mod to work even if player detection fails
             if (allChars.Length > 0)
             {
-                Debug.LogWarning($"[BTS] Could not verify player character! Using first CharacterMainControl found: {allChars[0].gameObject.name}");
+                // PERFORMANCE: Cache player and update cache time
+                cachedPlayer = allChars[0];
+                lastPlayerCacheTime = Time.time;
+                if (ENABLE_IS_THROWABLE_DEBUG_LOGS)
+                {
+                    Debug.LogWarning($"[BTS] Could not verify player character! Using first CharacterMainControl found: {allChars[0].gameObject.name}");
+                }
                 return allChars[0];
             }
             
@@ -3526,6 +4992,763 @@ namespace BetterThrowingSystem
                 }
             }
         }
+        
+        // ============================================================================
+        // ModConfig and Settings UI
+        // ============================================================================
+        
+        // Track if ModSetting is already set up
+        private static bool _modSettingSetup = false;
+        
+        /// <summary>
+        /// Try to initialize ModSetting - similar to RadialMenu's approach
+        /// Uses this.info from ModBehaviour base class
+        /// </summary>
+        private void TryInitializeModSetting()
+        {
+            if (_modSettingSetup)
+            {
+                Debug.Log("[BTS] ModSetting already set up, skipping");
+                return;
+            }
+            
+            // Check if info is valid (name and displayName should not be empty)
+            if (info.Equals(default(Duckov.Modding.ModInfo)) || string.IsNullOrEmpty(info.name))
+            {
+                Debug.LogWarning("[BTS] ModInfo is not valid yet (name is empty), cannot initialize ModSetting");
+                Debug.LogWarning($"[BTS] ModInfo details: name='{info.name}', displayName='{info.displayName}'");
+                return;
+            }
+            
+            Debug.Log($"[BTS] ModInfo is valid - name: '{info.name}', displayName: '{info.displayName}'");
+            
+            // Use this.info from ModBehaviour base class (just like RadialMenu does)
+            // RadialMenu uses: ModSettingAPI.Init(info)
+            if (ModSettingAPI.Init(info))
+            {
+                SetupModSetting();
+                LoadModSettingValues();
+                _modSettingSetup = true;
+                Debug.Log("[BTS] ModSetting initialized and registered successfully!");
+            }
+            else
+            {
+                Debug.Log("[BTS] ModSettingAPI not available yet, will retry when ModSetting mod is activated");
+            }
+        }
+        
+        /// <summary>
+        /// Setup ModSetting UI items - similar to RadialMenu's AddUIItems
+        /// </summary>
+        private void SetupModSetting()
+        {
+            Debug.Log("[BTS] Setting up ModSetting UI items...");
+            
+            // 1. Toggle for ThrowSoundEnabled
+            bool toggle1Result = ModSettingAPI.AddToggle(
+                "ThrowSoundEnabled",
+                "投掷音效开关 / Throw Sound",
+                throwSoundEnabled,
+                value => {
+                    throwSoundEnabled = value;
+                    Debug.Log($"[BTS] ThrowSoundEnabled changed to: {value}");
+                }
+            );
+            Debug.Log($"[BTS] AddToggle(ThrowSoundEnabled) result: {toggle1Result}");
+            
+            // 2. Dropdown for ThrowMode
+            var throwModeOptions = new System.Collections.Generic.List<string> { "按G装备", "按G投掷" };
+            string currentThrowMode = throwMode == ThrowMode.Equip ? "按G装备" : "按G投掷";
+            bool dropdown1Result = ModSettingAPI.AddDropdownList(
+                "ThrowMode",
+                "按G键模式 / G Key Mode",
+                throwModeOptions,
+                currentThrowMode,
+                value => {
+                    throwMode = value == "按G装备" ? ThrowMode.Equip : ThrowMode.Throw;
+                    Debug.Log($"[BTS] ThrowMode changed to: {value}");
+                }
+            );
+            Debug.Log($"[BTS] AddDropdownList(ThrowMode) result: {dropdown1Result}");
+            
+            // 3. Toggle for OtherViewSupportEnabled
+            bool toggle2Result = ModSettingAPI.AddToggle(
+                "OtherViewSupportEnabled",
+                "其他视角支持 / Other View Support",
+                otherViewSupportEnabled,
+                value => {
+                    otherViewSupportEnabled = value;
+                    Debug.Log($"[BTS] OtherViewSupportEnabled changed to: {value}");
+                }
+            );
+            Debug.Log($"[BTS] AddToggle(OtherViewSupportEnabled) result: {toggle2Result}");
+            
+            // 4. Dropdown for SelectedViewMode
+            var viewModeOptions = new System.Collections.Generic.List<string> { "正常视角", "第一人称", "第三人称" };
+            string currentViewMode = selectedViewMode == ViewMode.Normal ? "正常视角" : 
+                                     selectedViewMode == ViewMode.FirstPerson ? "第一人称" : "第三人称";
+            bool dropdown2Result = ModSettingAPI.AddDropdownList(
+                "SelectedViewMode",
+                "视角模式 / View Mode",
+                viewModeOptions,
+                currentViewMode,
+                value => {
+                    selectedViewMode = value == "正常视角" ? ViewMode.Normal :
+                                      value == "第一人称" ? ViewMode.FirstPerson : ViewMode.ThirdPerson;
+                    Debug.Log($"[BTS] SelectedViewMode changed to: {value}");
+                }
+            );
+            Debug.Log($"[BTS] AddDropdownList(SelectedViewMode) result: {dropdown2Result}");
+            
+            Debug.Log($"[BTS] ModSetting UI items added - Toggle1: {toggle1Result}, Dropdown1: {dropdown1Result}, Toggle2: {toggle2Result}, Dropdown2: {dropdown2Result}");
+        }
+        
+        /// <summary>
+        /// Load saved values from ModSetting - similar to RadialMenu's LoadConfigFromModSetting
+        /// </summary>
+        private void LoadModSettingValues()
+        {
+            if (!ModSettingAPI.IsInit) return;
+            
+            ModSettingAPI.GetValue<bool>("ThrowSoundEnabled", value => {
+                throwSoundEnabled = value;
+            });
+            
+            ModSettingAPI.GetValue<string>("ThrowMode", value => {
+                throwMode = value == "按G装备" ? ThrowMode.Equip : ThrowMode.Throw;
+            });
+            
+            ModSettingAPI.GetValue<bool>("OtherViewSupportEnabled", value => {
+                otherViewSupportEnabled = value;
+            });
+            
+            ModSettingAPI.GetValue<string>("SelectedViewMode", value => {
+                selectedViewMode = value == "正常视角" ? ViewMode.Normal :
+                                  value == "第一人称" ? ViewMode.FirstPerson : ViewMode.ThirdPerson;
+            });
+            
+            Debug.Log("[BTS] Loaded settings from ModSetting");
+        }
+        
+        /// <summary>
+        /// Teardown ModSetting - remove our settings
+        /// </summary>
+        private void TeardownModSetting()
+        {
+            if (!_modSettingSetup)
+            {
+                Debug.Log("[BTS] ModSetting teardown called but not set up, skipping");
+                return;
+            }
+            
+            try
+            {
+                Debug.Log("[BTS] Teardown ModSetting - removing our settings from ModSetting API");
+                ModSettingAPI.RemoveMod();
+                _modSettingSetup = false;
+                Debug.Log("[BTS] ModSetting teardown completed");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[BTS] Failed to teardown ModSetting: {ex.Message}");
+                Debug.LogWarning($"[BTS] Stack trace: {ex.StackTrace}");
+                // Reset flag even if teardown failed
+                _modSettingSetup = false;
+            }
+        }
+        
+        /// <summary>
+        /// OLD Initialize ModConfig integration - DEPRECATED, kept for reference
+        /// Based on official ModConfig API: https://github.com/FrozenFish259/duckov_mod_config
+        /// Returns true if registration was successful
+        /// </summary>
+        private bool InitializeModConfig_OLD()
+        {
+            try
+            {
+                Debug.Log("[BTS] Initializing ModConfig integration...");
+                
+                // Step 1: Find ModConfigAPI type by searching all loaded assemblies
+                System.Type? modConfigApiType = null;
+                System.Reflection.Assembly? modConfigAssembly = null;
+                
+                foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        var assemblyName = assembly.GetName().Name;
+                        
+                        // Try to find ModConfigAPI (the official API class) or ModSetting API
+                        modConfigApiType = assembly.GetType("ModConfig.ModConfigAPI") 
+                            ?? assembly.GetType("ModConfigAPI")
+                            ?? assembly.GetType("ModConfigApi")
+                            ?? assembly.GetType("ModSetting.ModSettingAPI")
+                            ?? assembly.GetType("ModSettingAPI")
+                            ?? assembly.GetType("ModSetting.ModSetting");
+                        
+                        if (modConfigApiType != null)
+                        {
+                            modConfigAssembly = assembly;
+                            Debug.Log($"[BTS] Found API type '{modConfigApiType.FullName}' in assembly: {assemblyName}");
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore assembly access errors
+                    }
+                }
+                
+                if (modConfigApiType == null || modConfigAssembly == null)
+                {
+                    // Log detailed debug info on first attempt only
+                    if (modConfigApiType == null)
+                    {
+                        Debug.LogWarning("[BTS] ModConfigAPI type not found in any loaded assembly!");
+                        Debug.Log("[BTS] Searching for ModConfig-related assemblies...");
+                        foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+                        {
+                            try
+                            {
+                                var assemblyName = assembly.GetName().Name;
+                        if (assemblyName != null && (assemblyName.Contains("ModConfig") || assemblyName.Contains("ModSetting")))
+                        {
+                            Debug.Log($"[BTS] Found potentially relevant assembly: {assemblyName}");
+                            try
+                            {
+                                var types = assembly.GetTypes().Where(t => 
+                                    t.Name.Contains("ModConfig") || 
+                                    t.Name.Contains("ModSetting") ||
+                                    t.Name.Contains("API") ||
+                                    t.Name.Contains("Config")).Take(15);
+                                foreach (var type in types)
+                                {
+                                    Debug.Log($"[BTS]   - Type: {type.FullName}");
+                                    // Also list methods for API types
+                                    if (type.Name.Contains("API") || type.Name.Contains("Config"))
+                                    {
+                                        var apiMethods = type.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static).Take(5);
+                                        foreach (var m in apiMethods)
+                                        {
+                                            var paramsStr = string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name));
+                                            Debug.Log($"[BTS]     -> {m.Name}({paramsStr})");
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                            }
+                            catch { }
+                        }
+                    }
+                    return false;
+                }
+                
+                // Step 2: Initialize API (only for ModConfig, not ModSetting)
+                bool isModSetting = modConfigApiType.FullName != null && modConfigApiType.FullName.Contains("ModSetting");
+                
+                if (!isModSetting)
+                {
+                    var initializeMethod = modConfigApiType.GetMethod("Initialize", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    
+                    if (initializeMethod != null)
+                    {
+                        try
+                        {
+                            var initResult = initializeMethod.Invoke(null, null);
+                            Debug.Log($"[BTS] ModConfigAPI.Initialize() called, result: {initResult}");
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[BTS] Failed to call ModConfigAPI.Initialize(): {ex.Message}");
+                        }
+                    }
+                }
+                else
+                {
+                    Debug.Log("[BTS] Using ModSetting API (no Initialize needed)");
+                }
+                
+                // Step 3: Check if API is available (skip for ModSetting as it doesn't have IsAvailable)
+                // Reuse isModSetting from Step 2
+                if (!isModSetting)
+                {
+                    // Only check IsAvailable for ModConfig
+                    var isAvailableMethod = modConfigApiType.GetMethod("IsAvailable", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    
+                    bool isAvailable = false;
+                    if (isAvailableMethod != null)
+                    {
+                        try
+                        {
+                            var result = isAvailableMethod.Invoke(null, null);
+                            isAvailable = result != null && (bool)result;
+                            Debug.Log($"[BTS] ModConfigAPI.IsAvailable() = {isAvailable}");
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[BTS] Failed to check ModConfigAPI.IsAvailable(): {ex.Message}");
+                        }
+                    }
+                    
+                    if (!isAvailable)
+                    {
+                        Debug.LogWarning("[BTS] ModConfig is not available. Settings will not appear in Mod Settings tab.");
+                        return false;
+                    }
+                }
+                else
+                {
+                    Debug.Log("[BTS] Using ModSetting API (skipping IsAvailable check)");
+                }
+                
+                // Step 4: Register configuration using the appropriate API
+                Debug.Log("[BTS] API is available, registering configuration...");
+                
+                // Try different registration methods based on which API we're using
+                // Reuse isModSetting from Step 2
+                if (isModSetting)
+                {
+                    // ModSetting API uses Init() then AddToggle/AddDropdownList methods
+                    // Step 4.1: Find ModInfo type (likely in Duckov.Modding namespace)
+                    System.Type? modInfoType = null;
+                    foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            modInfoType = assembly.GetType("Duckov.Modding.ModInfo") 
+                                ?? assembly.GetType("ModInfo");
+                            if (modInfoType != null)
+                            {
+                                Debug.Log($"[BTS] Found ModInfo type in assembly: {assembly.GetName().Name}");
+                                break;
+                            }
+                        }
+                        catch { }
+                    }
+                    
+                    if (modInfoType == null)
+                    {
+                        Debug.LogWarning("[BTS] ModInfo type not found, cannot initialize ModSetting");
+                        return false;
+                    }
+                    
+                    // Step 4.2: Get current mod's ModInfo
+                    // ModBehaviour inherits from Duckov.Modding.ModBehaviour which should have ModInfo property
+                    object? modInfo = null;
+                    
+                    // Try 1: Direct property access (if ModInfo is accessible)
+                    try
+                    {
+                        Debug.Log("[BTS] Attempting to get ModInfo via property...");
+                        // Use reflection to access ModInfo property from base class
+                        var modInfoProperty = typeof(Duckov.Modding.ModBehaviour).GetProperty("ModInfo",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                        if (modInfoProperty != null)
+                        {
+                            Debug.Log("[BTS] ModInfo property found, attempting to get value...");
+                            modInfo = modInfoProperty.GetValue(this);
+                            if (modInfo != null)
+                            {
+                                Debug.Log("[BTS] ✓ Got ModInfo from ModBehaviour.ModInfo property");
+                            }
+                            else
+                            {
+                                Debug.LogWarning("[BTS] ModInfo property exists but returned null");
+                            }
+                        }
+                        else
+                        {
+                            Debug.LogWarning("[BTS] ModInfo property not found in ModBehaviour");
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogWarning($"[BTS] Failed to get ModInfo via property: {ex.Message}");
+                        Debug.LogWarning($"[BTS] Exception stack: {ex.StackTrace}");
+                    }
+                    
+                    // Try 2: Check if there's a field instead of property
+                    if (modInfo == null)
+                    {
+                        try
+                        {
+                            Debug.Log("[BTS] Attempting to get ModInfo via field...");
+                            var modInfoField = typeof(Duckov.Modding.ModBehaviour).GetField("ModInfo",
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                            if (modInfoField != null)
+                            {
+                                Debug.Log("[BTS] ModInfo field found, attempting to get value...");
+                                modInfo = modInfoField.GetValue(this);
+                                if (modInfo != null)
+                                {
+                                    Debug.Log("[BTS] ✓ Got ModInfo from ModBehaviour.ModInfo field");
+                                }
+                                else
+                                {
+                                    Debug.LogWarning("[BTS] ModInfo field exists but returned null");
+                                }
+                            }
+                            else
+                            {
+                                Debug.LogWarning("[BTS] ModInfo field not found in ModBehaviour");
+                            }
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[BTS] Failed to get ModInfo via field: {ex.Message}");
+                            Debug.LogWarning($"[BTS] Exception stack: {ex.StackTrace}");
+                        }
+                    }
+                    
+                    // Try 3: Try to find ModInfo from ModManager by searching all loaded mods
+                    if (modInfo == null)
+                    {
+                        try
+                        {
+                            Debug.Log("[BTS] Attempting to get ModInfo from ModManager...");
+                            // First, try to find ModManager type in the correct assembly
+                            System.Type? modManagerType = null;
+                            foreach (var assembly in System.AppDomain.CurrentDomain.GetAssemblies())
+                            {
+                                try
+                                {
+                                    modManagerType = assembly.GetType("Duckov.Modding.ModManager");
+                                    if (modManagerType != null)
+                                    {
+                                        Debug.Log($"[BTS] Found ModManager in assembly: {assembly.GetName().Name}");
+                                        break;
+                                    }
+                                }
+                                catch { }
+                            }
+                            
+                            if (modManagerType == null)
+                            {
+                                Debug.LogWarning("[BTS] ModManager type not found");
+                            }
+                            else
+                            {
+                                // Try to get all loaded mods
+                                var getAllModsMethod = modManagerType.GetMethod("GetAllMods",
+                                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                                if (getAllModsMethod != null)
+                                {
+                                    Debug.Log("[BTS] Found GetAllMods method, attempting to get all mods...");
+                                    var allMods = getAllModsMethod.Invoke(null, null);
+                                    if (allMods != null)
+                                    {
+                                        // Try to iterate through the collection
+                                        var enumerable = allMods as System.Collections.IEnumerable;
+                                        if (enumerable != null)
+                                        {
+                                            foreach (var mod in enumerable)
+                                            {
+                                                try
+                                                {
+                                                    var nameProp = mod.GetType().GetProperty("Name");
+                                                    if (nameProp != null)
+                                                    {
+                                                        var name = nameProp.GetValue(mod)?.ToString();
+                                                        Debug.Log($"[BTS] Found mod: {name}");
+                                                        if (name != null && (name.Contains("BetterThrowing") || name.Contains("更好的投掷物")))
+                                                        {
+                                                            modInfo = mod;
+                                                            Debug.Log($"[BTS] ✓ Found our ModInfo by searching all mods: {name}");
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                catch { }
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Fallback: Try GetModInfo method
+                                if (modInfo == null)
+                                {
+                                    var getModInfoMethod = modManagerType.GetMethod("GetModInfo",
+                                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic,
+                                        null,
+                                        new System.Type[] { typeof(string) },
+                                        null);
+                                    if (getModInfoMethod != null)
+                                    {
+                                        Debug.Log("[BTS] Found GetModInfo method, trying 'BetterThrowingSystem'...");
+                                        modInfo = getModInfoMethod.Invoke(null, new object[] { "BetterThrowingSystem" });
+                                        if (modInfo != null)
+                                        {
+                                            Debug.Log("[BTS] ✓ Got ModInfo from ModManager.GetModInfo('BetterThrowingSystem')");
+                                        }
+                                        else
+                                        {
+                                            Debug.LogWarning("[BTS] GetModInfo('BetterThrowingSystem') returned null, trying display name...");
+                                            modInfo = getModInfoMethod.Invoke(null, new object[] { "更好的投掷物系统" });
+                                            if (modInfo != null)
+                                            {
+                                                Debug.Log("[BTS] ✓ Got ModInfo from ModManager.GetModInfo('更好的投掷物系统')");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[BTS] Failed to get ModInfo from ModManager: {ex.Message}");
+                            Debug.LogWarning($"[BTS] Exception stack: {ex.StackTrace}");
+                        }
+                    }
+                    
+                    // Try 4: Create a basic ModInfo object as last resort
+                    if (modInfo == null)
+                    {
+                        try
+                        {
+                            Debug.Log("[BTS] Attempting to create ModInfo object as last resort...");
+                            // List all constructors to see what's available
+                            var constructors = modInfoType.GetConstructors();
+                            Debug.Log($"[BTS] Found {constructors.Length} constructors for ModInfo");
+                            foreach (var ctor in constructors)
+                            {
+                                var paramTypes = string.Join(", ", ctor.GetParameters().Select(p => p.ParameterType.Name));
+                                Debug.Log($"[BTS]   - Constructor({paramTypes})");
+                            }
+                            
+                            // Try to create ModInfo with default constructor
+                            var modInfoCtor = modInfoType.GetConstructor(new System.Type[] { });
+                            if (modInfoCtor != null)
+                            {
+                                Debug.Log("[BTS] Found default constructor, attempting to create ModInfo...");
+                                modInfo = modInfoCtor.Invoke(null);
+                                Debug.Log("[BTS] ModInfo object created, attempting to set properties...");
+                                
+                                // Try to set name property if it exists
+                                var nameProp = modInfoType.GetProperty("Name");
+                                if (nameProp != null)
+                                {
+                                    Debug.Log($"[BTS] Name property found, CanWrite={nameProp.CanWrite}");
+                                    if (nameProp.CanWrite)
+                                    {
+                                        nameProp.SetValue(modInfo, "更好的投掷物系统");
+                                        Debug.Log("[BTS] Set Name property to '更好的投掷物系统'");
+                                    }
+                                }
+                                
+                                Debug.Log("[BTS] ✓ Created ModInfo object with default constructor");
+                            }
+                            else
+                            {
+                                Debug.LogWarning("[BTS] No default constructor found for ModInfo");
+                            }
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[BTS] Failed to create ModInfo: {ex.Message}");
+                            Debug.LogWarning($"[BTS] Exception stack: {ex.StackTrace}");
+                        }
+                    }
+                    
+                    if (modInfo == null)
+                    {
+                        Debug.LogWarning("[BTS] Could not get or create ModInfo object. Cannot initialize ModSetting.");
+                        return false;
+                    }
+                    
+                    // Step 4.3: Call Init(ModInfo modInfo)
+                    var initMethod = modConfigApiType.GetMethod("Init", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                        null,
+                        new System.Type[] { modInfoType },
+                        null);
+                    
+                    if (initMethod == null)
+                    {
+                        Debug.LogWarning("[BTS] Init method not found in ModSettingAPI");
+                        return false;
+                    }
+                    
+                    try
+                    {
+                        initMethod.Invoke(null, new object[] { modInfo });
+                        Debug.Log("[BTS] ModSettingAPI.Init() called successfully");
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogWarning($"[BTS] Failed to call ModSettingAPI.Init(): {ex.Message}");
+                        Debug.LogWarning($"[BTS] Exception: {ex}");
+                        return false;
+                    }
+                    
+                    // Step 4.4: Add individual settings using AddToggle, AddDropdownList, etc.
+                    try
+                    {
+                        // Add Toggle for ThrowSoundEnabled
+                        var addToggleMethod = modConfigApiType.GetMethod("AddToggle",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                            null,
+                            new System.Type[] { typeof(string), typeof(string), typeof(bool), typeof(System.Action<bool>) },
+                            null);
+                        
+                        if (addToggleMethod != null)
+                        {
+                            System.Action<bool> throwSoundCallback = (value) => {
+                                throwSoundEnabled = value;
+                                Debug.Log($"[BTS] ThrowSoundEnabled changed to: {value}");
+                            };
+                            
+                            addToggleMethod.Invoke(null, new object[] { 
+                                "ThrowSoundEnabled", 
+                                "投掷音效开关 / Throw Sound", 
+                                throwSoundEnabled,
+                                throwSoundCallback
+                            });
+                            Debug.Log("[BTS] Added ThrowSoundEnabled toggle");
+                        }
+                        
+                        // Add Dropdown for ThrowMode
+                        var addDropdownMethod = modConfigApiType.GetMethod("AddDropdownList",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                            null,
+                            new System.Type[] { typeof(string), typeof(string), typeof(System.Collections.Generic.List<string>), typeof(string), typeof(System.Action<string>) },
+                            null);
+                        
+                        if (addDropdownMethod != null)
+                        {
+                            var throwModeOptions = new System.Collections.Generic.List<string> { "按G装备", "按G投掷" };
+                            string currentThrowMode = throwMode == ThrowMode.Equip ? "按G装备" : "按G投掷";
+                            
+                            System.Action<string> throwModeCallback = (value) => {
+                                throwMode = value == "按G装备" ? ThrowMode.Equip : ThrowMode.Throw;
+                                Debug.Log($"[BTS] ThrowMode changed to: {value}");
+                            };
+                            
+                            addDropdownMethod.Invoke(null, new object[] { 
+                                "ThrowMode", 
+                                "按G键模式 / G Key Mode", 
+                                throwModeOptions,
+                                currentThrowMode,
+                                throwModeCallback
+                            });
+                            Debug.Log("[BTS] Added ThrowMode dropdown");
+                        }
+                        
+                        // Add Toggle for OtherViewSupportEnabled
+                        if (addToggleMethod != null)
+                        {
+                            System.Action<bool> otherViewCallback = (value) => {
+                                otherViewSupportEnabled = value;
+                                Debug.Log($"[BTS] OtherViewSupportEnabled changed to: {value}");
+                            };
+                            
+                            addToggleMethod.Invoke(null, new object[] { 
+                                "OtherViewSupportEnabled", 
+                                "其他视角支持 / Other View Support", 
+                                otherViewSupportEnabled,
+                                otherViewCallback
+                            });
+                            Debug.Log("[BTS] Added OtherViewSupportEnabled toggle");
+                        }
+                        
+                        // Add Dropdown for SelectedViewMode (only if OtherViewSupportEnabled is true)
+                        if (addDropdownMethod != null)
+                        {
+                            var viewModeOptions = new System.Collections.Generic.List<string> { "正常视角", "第一人称", "第三人称" };
+                            string currentViewMode = selectedViewMode == ViewMode.Normal ? "正常视角" :
+                                                    selectedViewMode == ViewMode.FirstPerson ? "第一人称" : "第三人称";
+                            
+                            System.Action<string> viewModeCallback = (value) => {
+                                selectedViewMode = value == "正常视角" ? ViewMode.Normal :
+                                                  value == "第一人称" ? ViewMode.FirstPerson : ViewMode.ThirdPerson;
+                                Debug.Log($"[BTS] SelectedViewMode changed to: {value}");
+                            };
+                            
+                            addDropdownMethod.Invoke(null, new object[] { 
+                                "SelectedViewMode", 
+                                "视角模式 / View Mode", 
+                                viewModeOptions,
+                                currentViewMode,
+                                viewModeCallback
+                            });
+                            Debug.Log("[BTS] Added SelectedViewMode dropdown");
+                        }
+                        
+                        Debug.Log("[BTS] ModSetting registration completed successfully!");
+                        return true;
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError($"[BTS] Failed to add ModSetting UI elements: {ex.Message}");
+                        Debug.LogError($"[BTS] Exception: {ex}");
+                        return false;
+                    }
+                }
+                else
+                {
+                    // ModConfig API - try RegisterConfig first
+                    var configObj = new BetterThrowingSystemConfig
+                    {
+                        ThrowSoundEnabled = throwSoundEnabled,
+                        ThrowMode = throwMode,
+                        OtherViewSupportEnabled = otherViewSupportEnabled,
+                        SelectedViewMode = selectedViewMode
+                    };
+                    
+                    var registerConfigMethod = modConfigApiType.GetMethod("RegisterConfig", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                        null,
+                        new System.Type[] { typeof(object) },
+                        null);
+                    
+                    if (registerConfigMethod != null)
+                    {
+                        try
+                        {
+                            registerConfigMethod.Invoke(null, new object[] { configObj });
+                            Debug.Log("[BTS] ModConfig registered successfully via RegisterConfig(object)");
+                            return true;
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[BTS] Failed to register via RegisterConfig: {ex.Message}");
+                        }
+                    }
+                    
+                    return false;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[BTS] Failed to initialize ModConfig: {ex}");
+                Debug.LogError($"[BTS] Exception details: {ex.Message}\n{ex.StackTrace}");
+                return false;
+            }
+        }
+        
+        /// <summary>
+        /// Configuration class for ModConfig integration
+        /// This class will be automatically displayed in the game's Mod Settings tab
+        /// Note: Header and Tooltip attributes are used by ModConfig framework to display settings in UI
+        /// </summary>
+        [System.Serializable]
+        public class BetterThrowingSystemConfig
+        {
+            // 投掷音效设置 / Throw Sound Settings
+            public bool ThrowSoundEnabled = true;
+            
+            // 按G键模式 / G Key Mode (按G装备 = Equip on G, 按G投掷 = Throw on G)
+            public ThrowMode ThrowMode = ThrowMode.Equip;
+            
+            // 视角支持 / View Support
+            public bool OtherViewSupportEnabled = false;
+            
+            // 第一人称 = First Person, 第三人称 = Third Person
+            public ViewMode SelectedViewMode = ViewMode.Normal;
+        }
     }
 }
 
@@ -3831,6 +6054,13 @@ namespace BetterThrowingSystem
 
         private void OnDestroy()
         {
+            // Clean up radial menu UI when mod is unloaded
+            if (radialMenuCanvas != null)
+            {
+                UnityEngine.Object.Destroy(radialMenuCanvas);
+                radialMenuCanvas = null;
+            }
+            radialMenuItems.Clear();
             // Cleanup when mod is unloaded
             if (isThrowingMode)
             {
