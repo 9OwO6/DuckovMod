@@ -161,11 +161,19 @@ namespace BetterThrowingSystem
         public static bool AddKeybinding(string key, string description,
             KeyCode keyCode, Action<KeyCode>? onValueChange = null)
         {
-            if (!Available(key)) return false;
+            Debug.Log($"[BTS] ModSettingAPI.AddKeybinding called - key: '{key}', description: '{description}', keyCode: {keyCode}");
+            if (!Available(key))
+            {
+                Debug.LogWarning($"[BTS] ModSettingAPI.AddKeybinding: Available(key) returned false for '{key}'");
+                return false;
+            }
+            Type delegateType = typeof(Action<ModInfo, string, string, KeyCode, Action<KeyCode>>);
+            Action<KeyCode> callback = onValueChange ?? (x => { });
+            Debug.Log($"[BTS] ModSettingAPI.AddKeybinding: Calling InvokeMethod with modInfo.name='{modInfo.name}', modInfo.displayName='{modInfo.displayName}'");
             return InvokeMethod(ADD_KEYBINDING,
                 ADD_KEYBINDING,
-                new object[] { modInfo, key, description, keyCode, onValueChange ?? (x => { }) },
-                typeof(Action<ModInfo, string, string, KeyCode, Action<KeyCode>>));
+                new object[] { modInfo, key, description, keyCode, callback },
+                delegateType);
         }
         
         public static bool AddInput(string key, string description,
