@@ -1,52 +1,72 @@
-# BetterThrowingSystem Mod
+# BetterThrowingSystem
 
-更好的投掷物系统 - 为《逃离鸭科夫》游戏添加投掷物背包和快捷操作功能。
+A quality-of-life gameplay mod for **Escape from Duckov** that improves throwable item handling with faster access, smoother switching, configurable behaviors, and expanded utility features.
 
-## 功能特性
+## Overview
 
-- 投掷物背包：支持携带5个投掷物
-- 快捷切换：按 G 键快速切换到手持装备中的投掷物
-- 自动扫描：自动检索玩家背包中的投掷物和食品
+BetterThrowingSystem is a custom mod built for *Escape from Duckov* to make throwable item usage more efficient and intuitive during gameplay.
 
-## 构建说明
+The original goal of the mod was to improve grenade and consumable access by introducing a dedicated throwable workflow. Over time, the project evolved into a broader gameplay enhancement mod with configurable hotkey behaviors, improved inventory logic, mod settings support, and a simple radial selector for throwable items.
 
-### 1. 配置项目路径
+This project was developed and iteratively refined based on real player feedback, testing limitations, and community requests.
 
-在 `BetterThrowingSystem.csproj` 文件中，需要设置 `DuckovPath` 变量指向游戏安装目录。
+## Features
 
-你可以：
-- 在 Visual Studio 中编辑项目属性，添加用户变量
-- 或者在构建前设置环境变量
-- 或者直接在 csproj 中硬编码路径（不推荐用于发布）
+### Core Features
+- **Throwable inventory support**  
+  Allows players to carry and manage up to 5 throwable items more conveniently.
 
-### 2. 构建项目
+- **Fast switching with hotkeys**  
+  Press **G** to quickly switch to throwable items from equipped gear.
 
+- **Automatic scanning**  
+  Automatically detects throwable items and food items from the player inventory.
+
+### Newer Updates
+- **Mod Settings UI support**  
+  Added an in-game settings interface through a separate Mod Settings dependency.
+
+- **Two throw modes**
+  - **Press G to Equip**: original/default behavior
+  - **Press G to Throw**: directly throws toward the mouse target area
+
+- **Auto switch-back after throw**  
+  Improves flow by automatically returning to the weapon after throwing.
+
+- **Throwable stacking**  
+  Enables stacking for throwable items to reduce inventory pressure.
+
+- **Faster throw charge option**  
+  Optional setting to speed up throwable charge time.
+
+- **Improved item detection logic**  
+  Refined recognition rules and excluded incorrectly detected items.
+
+- **Simple throwable radial menu**  
+  Added an early radial selector implementation for throwable selection.
+
+## Why I Built This
+
+I wanted to improve the feel of throwable usage in *Escape from Duckov*. The default workflow felt restrictive during active gameplay, especially when switching between weapons and throwable items.
+
+The mod started as a focused improvement for throwable access, but later expanded after community feedback showed demand for:
+- direct throw behavior
+- configurable settings
+- smoother weapon/throwable transitions
+- better inventory handling
+
+## Development Notes
+
+This mod was built in **C#** and designed around the game's modding workflow and available APIs. Some systems required practical adaptation and ongoing adjustment based on in-game item types, inventory behavior, and compatibility constraints.
+
+### Build Setup
+Set the `DuckovPath` variable in `BetterThrowingSystem.csproj` to point to the game installation directory.
+
+You can configure it by:
+- editing project properties in Visual Studio and adding a user variable
+- setting an environment variable before build
+- hardcoding the path in the `.csproj` file (not recommended for release)
+
+### Build Command
 ```bash
 dotnet build BetterThrowingSystem.csproj
-```
-
-构建完成后，将生成的 `BetterThrowingSystem.dll` 复制到 mod 文件夹中。
-
-### 3. 文件结构
-
-```
-BetterThrowingSystem/
-├── BetterThrowingSystem.csproj
-├── ModBehaviour.cs
-├── info.ini
-├── BetterThrowingSystem.dll (构建后生成)
-└── preview.png (可选)
-```
-
-## 注意事项
-
-- 代码中的 `IsThrowableItem()` 方法需要根据实际游戏中的物品类型进行调整
-- 可能需要根据实际 API 调整获取玩家角色和库存的方法
-- 确保所有引用的 DLL 文件路径正确
-
-## 待实现功能
-
-- [ ] 快捷伙食背包（E 键快捷进食/打药）
-- [ ] 长按选择轮盘（类似 GTA 的武器选择）
-- [ ] UI 显示当前装备的投掷物
-
