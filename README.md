@@ -10,6 +10,44 @@ An AI-assisted gameplay improvement mod for **Escape from Duckov**, designed to 
 - **Tech Context:** C#, game modding APIs, Unity-based game environment
 - **Focus Areas:** Gameplay usability, inventory flow, hotkey interaction, mod settings, iteration based on player needs
 
+## Demo / Preview
+
+- **GitHub Repository:** https://github.com/9OwO6/DuckovMod
+- **Steam Workshop Page:** https://steamcommunity.com/sharedfiles/filedetails/?id=3597348186
+- **Demo Video (temporary):** https://www.bilibili.com/video/BV1CF1rBYEgx/
+- **Note:** The current demo video is published on Bilibili. A YouTube version can be provided separately if needed.
+- **Design Notes:** [docs/design-notes.md](docs/design-notes.md)
+  
+## Community Validation
+
+This mod was published to the Steam Workshop and received real player adoption and feedback.
+
+Based on the current workshop stats shown in the project materials:
+
+- **24,170 unique visitors**
+- **7,440 subscribers**
+- **180 positive ratings**
+- strong ongoing community engagement through comments and iteration feedback
+
+Most of the current community feedback is in Chinese because the mod was first shared within a Chinese-speaking player community.
+
+This helped validate that the mod solved a real gameplay pain point rather than being just a personal prototype.
+
+### Steam Workshop Stats
+![Steam Workshop Stats](images/steam-stats.png)
+
+### Community Feedback
+![Community Feedback](images/steam-comments.png)
+
+## Screenshots
+
+### Workshop Preview
+![Workshop Preview](images/preview.png)
+
+### Gameplay / UI Preview
+![Gameplay / UI Preview](images/game-ui.png)
+![Gameplay / UI Preview](images/game-ui2.png)
+
 ## Project Background
 
 I started this project after noticing friction in the default throwable workflow during gameplay.  
@@ -122,42 +160,6 @@ Examples of iteration included:
 
 This project demonstrates how I approach real user-facing problems: identify friction, define a better workflow, iterate with available tools, and ship a practical solution.
 
-## Demo / Preview
-
-- **GitHub Repository:** https://github.com/9OwO6/DuckovMod
-- **Steam Workshop Page:** https://steamcommunity.com/sharedfiles/filedetails/?id=3597348186
-- **Demo Video (temporary):** https://www.bilibili.com/video/BV1CF1rBYEgx/
-- **Note:** The current demo video is published on Bilibili. A YouTube version can be provided separately if needed.
-- **Design Notes:** [docs/design-notes.md](docs/design-notes.md)
-  
-## Community Validation
-
-This mod was published to the Steam Workshop and received real player adoption and feedback.
-
-Based on the current workshop stats shown in the project materials:
-
-- **24,170 unique visitors**
-- **7,440 subscribers**
-- **180 positive ratings**
-- strong ongoing community engagement through comments and iteration feedback
-
-Most of the current community feedback is in Chinese because the mod was first shared within a Chinese-speaking player community.
-
-This helped validate that the mod solved a real gameplay pain point rather than being just a personal prototype.
-
-### Steam Workshop Stats
-![Steam Workshop Stats](images/steam-stats.png)
-
-### Community Feedback
-![Community Feedback](images/steam-comments.png)
-
-## Screenshots
-
-### Workshop Preview
-![Workshop Preview](images/preview.png)
-
-### Gameplay / UI Preview
-_Add one gameplay or settings screenshot here if available._
 
 ## Impact
 
