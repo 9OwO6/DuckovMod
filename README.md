@@ -1,16 +1,36 @@
-# BetterThrowingSystem
+# BetterThrowingSystem — Duckov Mod Showcase
 
-A quality-of-life gameplay mod for **Escape from Duckov** that improves throwable item handling with faster access, smoother switching, configurable behaviors, and expanded utility features.
+An AI-assisted gameplay improvement mod for **Escape from Duckov**, designed to make throwable item usage faster, smoother, and more flexible for real players.
 
-## Overview
+## Quick Summary
 
-BetterThrowingSystem is a custom mod built for *Escape from Duckov* to make throwable item usage more efficient and intuitive during gameplay.
+- **Project Type:** Gameplay quality-of-life mod / product-style modding project
+- **Game:** Escape from Duckov
+- **Role:** Problem discovery, feature design, AI-assisted implementation workflow, testing, iteration, and release
+- **Tech Context:** C#, game modding APIs, Unity-based game environment
+- **Focus Areas:** Gameplay usability, inventory flow, hotkey interaction, mod settings, iteration based on player needs
 
-The original goal of the mod was to improve grenade and consumable access by introducing a dedicated throwable workflow. Over time, the project evolved into a broader gameplay enhancement mod with configurable hotkey behaviors, improved inventory logic, mod settings support, and a simple radial selector for throwable items.
+## Project Background
 
-This project was developed and iteratively refined based on real player feedback, testing limitations, and community requests.
+I started this project after noticing friction in the default throwable workflow during gameplay.  
+Switching between weapons and throwable items felt restrictive, and the interaction flow was not as smooth or practical as it could be in active combat situations.
 
-## Features
+The original goal was simple: improve throwable access and make the experience more intuitive.  
+As the project evolved, I expanded it based on testing, limitations in the game workflow, and feedback from other players.
+
+## What the Mod Does
+
+BetterThrowingSystem improves throwable item handling in several ways:
+
+- supports more convenient throwable item access
+- allows faster switching with hotkeys
+- improves inventory detection for throwable-related items
+- adds configurable throw behavior options
+- supports mod settings integration
+- improves post-throw flow with auto switch-back behavior
+- reduces friction in repeated gameplay actions
+
+## Key Features
 
 ### Core Features
 - **Throwable inventory support**  
@@ -22,42 +42,98 @@ This project was developed and iteratively refined based on real player feedback
 - **Automatic scanning**  
   Automatically detects throwable items and food items from the player inventory.
 
-### Newer Updates
+### Later Improvements
 - **Mod Settings UI support**  
   Added an in-game settings interface through a separate Mod Settings dependency.
 
 - **Two throw modes**
-  - **Press G to Equip**: original/default behavior
-  - **Press G to Throw**: directly throws toward the mouse target area
+  - **Press G to Equip**
+  - **Press G to Throw**
 
 - **Auto switch-back after throw**  
-  Improves flow by automatically returning to the weapon after throwing.
+  Returns the player to their weapon after throwing for smoother gameplay flow.
 
 - **Throwable stacking**  
-  Enables stacking for throwable items to reduce inventory pressure.
+  Reduces inventory pressure.
 
 - **Faster throw charge option**  
-  Optional setting to speed up throwable charge time.
+  Adds an optional speed improvement for throwable charge time.
 
 - **Improved item detection logic**  
-  Refined recognition rules and excluded incorrectly detected items.
+  Refined recognition rules and excluded incorrect matches.
 
 - **Simple throwable radial menu**  
-  Added an early radial selector implementation for throwable selection.
+  Added an early radial selector for throwable selection.
 
-## Why I Built This
+## My Role
 
-I wanted to improve the feel of throwable usage in *Escape from Duckov*. The default workflow felt restrictive during active gameplay, especially when switching between weapons and throwable items.
+This project reflects my work in:
 
-The mod started as a focused improvement for throwable access, but later expanded after community feedback showed demand for:
-- direct throw behavior
-- configurable settings
-- smoother weapon/throwable transitions
-- better inventory handling
+- identifying a concrete gameplay pain point
+- defining feature goals and desired player experience
+- iterating with AI tools to explore implementation directions
+- working within the game’s modding/API constraints
+- testing features in practice and refining behavior
+- shipping the mod for real use and improving it over time
 
-## Development Notes
+Rather than positioning this as a traditional hand-coded engineering project, I present it as an **AI-assisted product and modding workflow** where I focused on problem definition, feature shaping, iteration, testing, and delivery.
 
-This mod was built in **C#** and designed around the game's modding workflow and available APIs. Some systems required practical adaptation and ongoing adjustment based on in-game item types, inventory behavior, and compatibility constraints.
+## How AI Was Involved
+
+AI tools were a major part of the development workflow for this project.
+
+I used AI assistance to help with:
+
+- exploring implementation approaches
+- translating gameplay ideas into mod features
+- understanding unfamiliar API and code patterns
+- iterating on feature behavior
+- refining logic through repeated testing and adjustment
+- speeding up the path from concept to usable release
+
+My main value in this project was not just “asking for code,” but continuously guiding the direction, validating the output in the actual game context, identifying what did or did not work, and shaping the mod toward a better gameplay experience.
+
+## Technical Approach
+
+This mod was built in **C#** and designed around the game's available modding workflow and APIs.
+
+Technical work in this project involved:
+
+- interacting with the game’s item and inventory systems
+- handling hotkey-based behavior
+- adapting to Unity/game DLL references
+- improving compatibility with in-game settings workflows
+- refining detection logic for item categories and edge cases
+
+Because modding work is highly constrained by the game environment, much of the effort involved practical adaptation, testing, and iteration instead of idealized greenfield development.
+
+## Iteration and Release Highlights
+
+This project was not a one-time prototype. It evolved through repeated refinement.
+
+Examples of iteration included:
+
+- expanding beyond the initial throwable access concept
+- adding configurable throw modes
+- improving quality-of-life flow after throw actions
+- refining item detection to avoid incorrect behavior
+- adding settings support to make the mod more usable
+- experimenting with a radial selector for easier item choice
+
+This project demonstrates how I approach real user-facing problems: identify friction, define a better workflow, iterate with available tools, and ship a practical solution.
+
+## Demo / Preview
+
+- **GitHub Repository:** https://github.com/9OwO6/DuckovMod
+- **Release / Download:** Add release link here if available
+- **Demo Video:** Add video link here if available
+- **Screenshots:** Add screenshots below
+
+## Screenshots
+
+_Add gameplay screenshots, settings UI screenshots, or short GIF previews here._
+
+## Build Notes
 
 ### Build Setup
 Set the `DuckovPath` variable in `BetterThrowingSystem.csproj` to point to the game installation directory.
