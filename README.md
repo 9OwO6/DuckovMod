@@ -125,13 +125,45 @@ This project demonstrates how I approach real user-facing problems: identify fri
 ## Demo / Preview
 
 - **GitHub Repository:** https://github.com/9OwO6/DuckovMod
-- **Release / Download:** Add release link here if available
-- **Demo Video:** Add video link here if available
-- **Screenshots:** Add screenshots below
+- **Steam Workshop Page:** https://steamcommunity.com/sharedfiles/filedetails/?id=3597348186
+- **Demo Video (temporary):** https://www.bilibili.com/video/BV1CF1rBYEgx/
+- **Note:** The current demo video is published on Bilibili. A YouTube version can be provided separately if needed.
+- **Design Notes:** [docs/design-notes.md](docs/design-notes.md)
+  
+## Community Validation
+
+This mod was published to the Steam Workshop and received real player adoption and feedback.
+
+Based on the current workshop stats shown in the project materials:
+
+- **24,170 unique visitors**
+- **7,440 subscribers**
+- **180 positive ratings**
+- strong ongoing community engagement through comments and iteration feedback
+
+Most of the current community feedback is in Chinese because the mod was first shared within a Chinese-speaking player community.
+
+This helped validate that the mod solved a real gameplay pain point rather than being just a personal prototype.
+
+### Steam Workshop Stats
+![Steam Workshop Stats](images/steam-stats.png)
+
+### Community Feedback
+![Community Feedback](images/steam-comments.png)
 
 ## Screenshots
 
-_Add gameplay screenshots, settings UI screenshots, or short GIF previews here._
+### Workshop Preview
+![Workshop Preview](images/preview.png)
+
+### Gameplay / UI Preview
+_Add one gameplay or settings screenshot here if available._
+
+## Impact
+
+This project shows my ability to identify a concrete user pain point, shape a practical solution, iterate with AI-assisted workflows, and release something that people actually adopt and respond to.
+
+It also reflects how I work in ambiguous environments: I test quickly, refine based on user feedback, and focus on making the end experience better.
 
 ## Build Notes
 
